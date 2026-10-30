@@ -1,5 +1,7 @@
 use super::{Chip8Error, State};
 
+const FONT_STARTING_LOCATION: u16 = 80;
+
 pub(crate) fn clear_screen(state: &mut State) {
     state.display = [[false; 64]; 32];
 }
@@ -16,10 +18,50 @@ pub(crate) fn add_value_to_register(state: &mut State, x: usize, value: u8) {
     state.v[x] = state.v[x].wrapping_add(value);
 }
 
+pub(crate) fn set_register_from_register(state: &mut State, x: usize, y: usize) {
+    state.v[x] = state.v[y];
+}
+
+pub(crate) fn or_registers(state: &mut State, x: usize, y: usize) {
+    state.v[x] |= state.v[y];
+}
+
+pub(crate) fn and_registers(state: &mut State, x: usize, y: usize) {
+    state.v[x] &= state.v[y];
+}
+
+pub(crate) fn xor_registers(state: &mut State, x: usize, y: usize) {
+    state.v[x] ^= state.v[y];
+}
+
 pub(crate) fn add_register_with_carry(state: &mut State, x: usize, y: usize) {
     let (value, carried) = state.v[x].overflowing_add(state.v[y]);
     state.v[x] = value;
     state.v[0xF] = u8::from(carried);
+}
+
+pub(crate) fn subtract_registers(state: &mut State, x: usize, y: usize) {
+    let (value, borrowed) = state.v[x].overflowing_sub(state.v[y]);
+    state.v[x] = value;
+    state.v[0xF] = u8::from(!borrowed);
+}
+
+pub(crate) fn subtract_registers_reverse(state: &mut State, x: usize, y: usize) {
+    let (value, borrowed) = state.v[y].overflowing_sub(state.v[x]);
+    state.v[x] = value;
+    state.v[0xF] = u8::from(!borrowed);
+}
+
+pub(crate) fn shift_right(state: &mut State, x: usize) {
+    let value = state.v[x];
+    state.v[x] = value >> 1;
+    state.v[0xF] = value & 1;
+}
+
+pub(crate) fn shift_left(state: &mut State, x: usize) {
+    let value = state.v[x];
+    state.v[x] = value << 1;
+    state.v[0xF] = value >> 7;
 }
 
 pub(crate) fn set_index_register(state: &mut State, value: u16) {
@@ -106,6 +148,30 @@ pub(crate) fn jump_with_offset(state: &mut State, to: u16) {
 
 pub(crate) fn read_delay_timer(state: &mut State, x: usize) {
     state.v[x] = state.delay;
+}
+
+pub(crate) fn wait_for_key(state: &mut State, x: usize) {
+    if let Some(key) = state.keypad_input.iter().position(|pressed| *pressed) {
+        state.v[x] = key as u8;
+    } else {
+        state.pc = state.pc.wrapping_sub(2);
+    }
+}
+
+pub(crate) fn add_to_index(state: &mut State, x: usize) {
+    state.i = state.i.wrapping_add(state.v[x] as u16);
+}
+
+pub(crate) fn set_index_to_font(state: &mut State, x: usize) {
+    state.i = FONT_STARTING_LOCATION + (state.v[x] as u16 & 0x0F) * 5;
+}
+
+pub(crate) fn store_bcd(state: &mut State, x: usize) {
+    let value = state.v[x];
+    let base = state.i as usize;
+    state.memory[base] = value / 100;
+    state.memory[base + 1] = (value / 10) % 10;
+    state.memory[base + 2] = value % 10;
 }
 
 pub(crate) fn set_delay_timer(state: &mut State, x: usize) {

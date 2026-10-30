@@ -1,6 +1,6 @@
 //! Register and arithmetic instructions.
 //!
-//! Expected values come from standard CHIP-8 semantics. 
+//! Expected values come from standard CHIP-8 semantics.
 
 mod common;
 

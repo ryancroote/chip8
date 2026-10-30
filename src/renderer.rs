@@ -61,7 +61,9 @@ impl Renderer {
         }
 
         // Ignore the result: a dropped frame on window-close is not fatal.
-        let _ = self.window.update_with_buffer(&self.buffer, self.width, self.height);
+        let _ = self
+            .window
+            .update_with_buffer(&self.buffer, self.width, self.height);
     }
 
     /// True while the user has not requested the window be closed.

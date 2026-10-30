@@ -132,9 +132,19 @@ impl State {
             }
             (0x6, x, _, _) => instructions::set_register(self, x as usize, nn),
             (0x7, x, _, _) => instructions::add_value_to_register(self, x as usize, nn),
-            (0x8, x, y, 0x4) => {
-                instructions::add_register_with_carry(self, x as usize, y as usize)
+            (0x8, x, y, 0x0) => {
+                instructions::set_register_from_register(self, x as usize, y as usize)
             }
+            (0x8, x, y, 0x1) => instructions::or_registers(self, x as usize, y as usize),
+            (0x8, x, y, 0x2) => instructions::and_registers(self, x as usize, y as usize),
+            (0x8, x, y, 0x3) => instructions::xor_registers(self, x as usize, y as usize),
+            (0x8, x, y, 0x4) => instructions::add_register_with_carry(self, x as usize, y as usize),
+            (0x8, x, y, 0x5) => instructions::subtract_registers(self, x as usize, y as usize),
+            (0x8, x, _, 0x6) => instructions::shift_right(self, x as usize),
+            (0x8, x, y, 0x7) => {
+                instructions::subtract_registers_reverse(self, x as usize, y as usize)
+            }
+            (0x8, x, _, 0xE) => instructions::shift_left(self, x as usize),
             (0x9, x, y, 0x0) => {
                 instructions::skip_if_x_and_y_are_not_equal(self, x as usize, y as usize)
             }
@@ -144,6 +154,10 @@ impl State {
             (0xE, x, 0x9, 0xE) => instructions::skip_if_key_pressed(self, x as usize),
             (0xE, x, 0xA, 0x1) => instructions::skip_if_key_not_pressed(self, x as usize),
             (0xF, x, 0x0, 0x7) => instructions::read_delay_timer(self, x as usize),
+            (0xF, x, 0x0, 0xA) => instructions::wait_for_key(self, x as usize),
+            (0xF, x, 0x1, 0xE) => instructions::add_to_index(self, x as usize),
+            (0xF, x, 0x2, 0x9) => instructions::set_index_to_font(self, x as usize),
+            (0xF, x, 0x3, 0x3) => instructions::store_bcd(self, x as usize),
             (0xF, x, 0x1, 0x5) => instructions::set_delay_timer(self, x as usize),
             (0xF, x, 0x1, 0x8) => instructions::set_sound_timer(self, x as usize),
             (0xF, x, 0x5, 0x5) => instructions::store_registers(self, x as usize),
