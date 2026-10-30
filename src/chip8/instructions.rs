@@ -68,6 +68,10 @@ pub(crate) fn set_index_register(state: &mut State, value: u16) {
     state.i = value;
 }
 
+pub(crate) fn random_mask(state: &mut State, x: usize, mask: u8) {
+    state.v[x] = state.random_byte() & mask;
+}
+
 pub(crate) fn draw(state: &mut State, vx: usize, vy: usize, n: u16) {
     let x = (state.v[vx] & 63) as usize;
     let y = (state.v[vy] & 31) as usize;

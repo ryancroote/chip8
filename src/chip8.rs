@@ -61,6 +61,7 @@ pub struct State {
     pub memory: [u8; 4096],
     pub keypad_input: KeypadInput,
     pub stack: Vec<u16>,
+    random_state: u32,
 }
 
 impl State {
@@ -78,6 +79,7 @@ impl State {
             memory,
             keypad_input: [false; 16],
             stack: Vec::new(),
+            random_state: 0xA341_316C,
         }
     }
 
@@ -92,6 +94,21 @@ impl State {
     /// Simulate a keypad transition for one key.
     pub fn set_key(&mut self, key: KeyInput, pressed: bool) {
         self.keypad_input[key.index()] = pressed;
+    }
+
+    /// Set the seed used by the deterministic random-byte generator.
+    pub fn seed_random(&mut self, seed: u32) {
+        self.random_state = if seed == 0 { 1 } else { seed };
+    }
+
+    fn random_byte(&mut self) -> u8 {
+        // xorshift32; keep the zero state unreachable because it never changes.
+        let mut value = self.random_state;
+        value ^= value << 13;
+        value ^= value >> 17;
+        value ^= value << 5;
+        self.random_state = value;
+        value as u8
     }
 
     /// Advance the delay and sound timers by one tick.
@@ -150,6 +167,7 @@ impl State {
             }
             (0xA, _, _, _) => instructions::set_index_register(self, nnn),
             (0xB, _, _, _) => instructions::jump_with_offset(self, nnn),
+            (0xC, x, _, _) => instructions::random_mask(self, x as usize, nn),
             (0xD, x, y, n) => instructions::draw(self, x as usize, y as usize, n),
             (0xE, x, 0x9, 0xE) => instructions::skip_if_key_pressed(self, x as usize),
             (0xE, x, 0xA, 0x1) => instructions::skip_if_key_not_pressed(self, x as usize),

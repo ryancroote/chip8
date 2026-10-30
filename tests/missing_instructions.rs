@@ -17,6 +17,19 @@ fn register_logic_and_subtract_instructions() {
 }
 
 #[test]
+fn cxnn_ands_a_seeded_random_byte_with_the_immediate() {
+    let mut state = chip8::chip8::State::new();
+    state.seed_random(1);
+    state.load_program(&[0xC0, 0xF0], 0x200);
+
+    state.step().unwrap();
+
+    // xorshift32(1) produces 0x0004_2021; its low byte AND 0xF0 is 0x20.
+    assert_eq!(state.v[0], 0x20);
+    assert_eq!(state.pc, 0x202);
+}
+
+#[test]
 fn fx0a_waits_then_stores_first_pressed_key() {
     let mut state = chip8::chip8::State::new();
     state.load_program(&[0xF0, 0x0A], 0x200);
