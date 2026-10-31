@@ -2,7 +2,8 @@
 
 `chip8-agent` is a headless process that uses the same emulator operations as
 instruction tests. It opens no window and does not read the clock or a physical
-keyboard. The graphical executable remains `chip8`.
+keyboard. The graphical executable remains `chip8`; the only other binary that
+opens a window is `chip8-explore`, and only when asked to with `--view`.
 
 ## Live control
 
@@ -151,14 +152,15 @@ loaded program stays in place for the whole run.
 
 ```text
 runs/ibm/
-  summary.json     status, seed, ROM SHA-256, action counts, last snapshot
+  summary.json     status, seed, ROM SHA-256, action counts, pacing settings
   trace.jsonl      one line per action: index, action, full response
   display/0000.png one enlarged monochrome image per action
 ```
 
-The summary also records `viewer` and `delay_ms`, so a run's pacing settings are
-visible after the fact. Images are `8`x enlarged, so each CHIP-8 pixel is a
-distinct 8x8 block. Artifacts are kept for successful and failed runs alike.
+The summary stays small and also records `viewer` and `delay_ms`, so a run's
+pacing settings are visible after the fact. Images are `8`x enlarged, so each
+CHIP-8 pixel is a distinct 8x8 block. Artifacts are kept for successful and
+failed runs alike; full per-action state lives in the trace, not the summary.
 
 ### When a run stops early
 
@@ -171,11 +173,13 @@ action index and the kind of event on stderr:
 | `malformed_response` | A reply was not JSON, or carried no usable action or display. |
 | `mismatched_response` | A reply answered a different action than the one sent. |
 | `child_exit` | The agent or the emulator exited before replying, or exited nonzero at the end. |
-| `timeout` | The agent or the emulator did not reply within `--timeout-ms`. |
+| `timeout` | The agent or the emulator did not reply, or stopped accepting input, within `--timeout-ms`. |
 
 Failure evidence is never discarded: the summary gains a `failure` object with
-`kind`, `index`, and `detail`, the trace and images keep everything written
-before the failure, and `last_snapshot` holds the last trustworthy snapshot.
+`kind`, `index`, and `detail`, plus a `last_snapshot` holding the last
+trustworthy snapshot; the trace and images keep everything written before the
+failure. Only failed summaries carry `last_snapshot`, which is why successful
+ones stay small.
 The run never continues past a failure, because a core fault can leave the
 emulator's internal state partially changed.
 
@@ -204,8 +208,9 @@ Run `cargo test`. Subprocess tests cover the public JSON interface and fixture
 workflow; existing direct-state tests cover instruction semantics.
 
 `tests/explore.rs` covers the exploratory run command line: seeded repeatability,
-the agent process boundary, per-action images, early-stop failure kinds, and
-pacing that does not change what the agent chooses. The live window itself is
+the agent process boundary, per-action images, early-stop failure kinds
+(including a child that stops reading or answering), and pacing that does not
+change what the agent chooses. The live window itself is
 verified by hand, since opening one has no place in an automated suite.
 
 If the local macOS linker rejects the selected SDK's `arm64e.x1` stubs, an

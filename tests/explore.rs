@@ -358,3 +358,37 @@ fn pacing_does_not_change_the_actions_a_seed_chooses() {
     assert_eq!(paced["viewer"], false);
     assert_eq!(paced["delay_ms"], 20);
 }
+
+#[test]
+fn an_agent_that_never_drains_its_input_times_out_instead_of_hanging() {
+    let dir = tempfile::tempdir().unwrap();
+    let rom = rom(dir.path());
+    // Answers every turn, but never reads: the harness's writes eventually
+    // block, which must become a timeout rather than a hung run.
+    let agent = script(
+        dir.path(),
+        "agent.sh",
+        "while true; do echo '{\"action\":{\"type\":\"step\"}}'; done",
+    );
+    let run = Command::new(env!("CARGO_BIN_EXE_chip8-explore"))
+        .args([
+            "--rom",
+            rom.to_str().unwrap(),
+            "--seed",
+            "42",
+            "--actions",
+            "200",
+            "--output",
+            dir.path().join("run").to_str().unwrap(),
+            "--agent",
+            agent.to_str().unwrap(),
+            "--timeout-ms",
+            "500",
+        ])
+        .output()
+        .unwrap();
+    assert!(!run.status.success());
+    let summary = summary(dir.path(), "run");
+    assert_eq!(summary["failure"]["kind"], "timeout");
+    assert!(summary["actions"].as_u64().unwrap() < 200);
+}

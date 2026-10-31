@@ -8,6 +8,9 @@ The headless JSON protocol, complete machine snapshots, checkpoint fixtures,
 and candidate review/promotion workflow are documented in
 [`docs/agent-harness.md`](docs/agent-harness.md). Subprocess tests exercise this
 public boundary; recorded candidates are not approved expectations until human review.
+Exploratory runs, which drive a ROM through an autonomous agent process and keep a
+trace plus per-action display images, are covered by `tests/explore.rs` and documented
+in the same file.
 
 ## Running tests
 

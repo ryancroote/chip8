@@ -14,8 +14,10 @@ use std::fs::File;
 use std::fmt;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{
+    Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel,
+};
 use std::time::Duration;
 
 /// Where a program is loaded, matching the emulator's reset PC.
@@ -38,16 +40,37 @@ struct Options {
     delay: Duration,
 }
 
-/// The kinds of unexpected event that end a run.
-#[derive(Clone)]
+/// The closed set of unexpected events that end a run. The names appear in
+/// summary files and documentation, so they only change deliberately.
+enum Kind {
+    EmulatorError,
+    MalformedResponse,
+    MismatchedResponse,
+    ChildExit,
+    Timeout,
+}
+
+impl Kind {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::EmulatorError => "emulator_error",
+            Self::MalformedResponse => "malformed_response",
+            Self::MismatchedResponse => "mismatched_response",
+            Self::ChildExit => "child_exit",
+            Self::Timeout => "timeout",
+        }
+    }
+}
+
+/// The unexpected event that ended a run.
 struct Failure {
-    kind: &'static str,
+    kind: Kind,
     index: Option<usize>,
     detail: String,
 }
 
 impl Failure {
-    fn at(kind: &'static str, index: Option<usize>, detail: impl Into<String>) -> Self {
+    fn at(kind: Kind, index: Option<usize>, detail: impl Into<String>) -> Self {
         Self {
             kind,
             index,
@@ -56,15 +79,15 @@ impl Failure {
     }
 
     fn json(&self) -> Value {
-        json!({"kind": self.kind, "index": self.index, "detail": self.detail})
+        json!({"kind": self.kind.name(), "index": self.index, "detail": self.detail})
     }
 }
 
 impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.index {
-            Some(index) => write!(f, "action {index}: {}: {}", self.kind, self.detail),
-            None => write!(f, "{}: {}", self.kind, self.detail),
+            Some(index) => write!(f, "action {index}: {}: {}", self.kind.name(), self.detail),
+            None => write!(f, "{}: {}", self.kind.name(), self.detail),
         }
     }
 }
@@ -95,12 +118,19 @@ impl Report {
             "actions": self.completed,
             "viewer": self.view,
             "delay_ms": self.delay_ms,
-            "last_snapshot": self.last,
         });
+        // The summary stays concise; a failure adds the evidence needed to
+        // reproduce it, including the last trustworthy snapshot.
         if let Some(failure) = &self.failure {
             summary["failure"] = failure.json();
+            summary["last_snapshot"] = self.last.clone();
         }
         summary
+    }
+
+    /// Record the event that ended the run.
+    fn fail(&mut self, kind: Kind, detail: impl Into<String>) {
+        self.failure = Some(Failure::at(kind, None, detail));
     }
 
     fn write(&self) -> Result<(), String> {
@@ -175,12 +205,15 @@ fn parse(args: Vec<String>) -> Result<Options, String> {
     })
 }
 
-/// A child process speaking one JSON document per line. Reading happens on its
-/// own thread so a silent child becomes a timeout instead of a hung run.
+/// A child process speaking one JSON document per line.
+///
+/// Both directions run on their own threads behind bounded channels, so a
+/// child that stops reading or stops answering becomes a timeout instead of a
+/// hung run.
 struct LineProcess {
     label: &'static str,
     child: Child,
-    stdin: Option<ChildStdin>,
+    writes: Option<SyncSender<String>>,
     lines: Receiver<Option<String>>,
 }
 
@@ -191,6 +224,20 @@ impl LineProcess {
             .stdout(Stdio::piped())
             .spawn()
             .map_err(|e| format!("failed to start {label}: {e}"))?;
+
+        let mut stdin = child.stdin.take().unwrap();
+        let (writes, pending) = sync_channel::<String>(1);
+        std::thread::spawn(move || {
+            while let Ok(line) = pending.recv() {
+                if writeln!(stdin, "{line}")
+                    .and_then(|_| stdin.flush())
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+
         let stdout = child.stdout.take().unwrap();
         let (sender, lines) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -208,40 +255,70 @@ impl LineProcess {
             }
             let _ = sender.send(None);
         });
+
         Ok(Self {
             label,
-            stdin: child.stdin.take(),
             child,
+            writes: Some(writes),
             lines,
         })
     }
 
-    fn send(&mut self, value: &Value, index: Option<usize>) -> Result<(), Failure> {
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or(Failure::at("child_exit", index, "input already closed"))?;
-        writeln!(stdin, "{value}")
-            .and_then(|_| stdin.flush())
-            .map_err(|e| {
-                Failure::at(
-                    "child_exit",
-                    index,
-                    format!("{} closed its input: {e}", self.label),
-                )
-            })
+    fn send(
+        &mut self,
+        value: &Value,
+        timeout: Duration,
+        index: Option<usize>,
+    ) -> Result<(), Failure> {
+        let writes = self.writes.as_ref().ok_or(Failure::at(
+            Kind::ChildExit,
+            index,
+            "input already closed",
+        ))?;
+        // The writer thread keeps a bounded queue, so a child that stops
+        // draining its input shows up as a full queue rather than a blocked
+        // write.
+        let deadline = std::time::Instant::now() + timeout;
+        let mut pending = value.to_string();
+        loop {
+            match writes.try_send(pending) {
+                Ok(()) => return Ok(()),
+                Err(TrySendError::Full(line)) if std::time::Instant::now() < deadline => {
+                    pending = line;
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(TrySendError::Full(_)) => {
+                    return Err(Failure::at(
+                        Kind::Timeout,
+                        index,
+                        format!(
+                            "{} did not accept input within {}ms",
+                            self.label,
+                            timeout.as_millis()
+                        ),
+                    ));
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    return Err(Failure::at(
+                        Kind::ChildExit,
+                        index,
+                        format!("{} closed its input", self.label),
+                    ));
+                }
+            }
+        }
     }
 
     fn receive(&mut self, timeout: Duration, index: Option<usize>) -> Result<String, Failure> {
         match self.lines.recv_timeout(timeout) {
             Ok(Some(line)) => Ok(line),
             Ok(None) | Err(RecvTimeoutError::Disconnected) => Err(Failure::at(
-                "child_exit",
+                Kind::ChildExit,
                 index,
                 format!("{} exited before responding", self.label),
             )),
             Err(RecvTimeoutError::Timeout) => Err(Failure::at(
-                "timeout",
+                Kind::Timeout,
                 index,
                 format!(
                     "{} did not respond within {}ms",
@@ -259,32 +336,53 @@ impl LineProcess {
         timeout: Duration,
         index: Option<usize>,
     ) -> Result<Value, Failure> {
-        self.send(value, index)?;
+        self.send(value, timeout, index)?;
         let line = self.receive(timeout, index)?;
         serde_json::from_str(&line).map_err(|e| {
             Failure::at(
-                "malformed_response",
+                Kind::MalformedResponse,
                 index,
                 format!("{} sent invalid JSON ({e}): {line}", self.label),
             )
         })
     }
 
-    /// Close the input and require a clean exit.
-    fn shutdown(mut self) -> Result<(), Failure> {
-        self.stdin = None;
-        match self.child.wait() {
-            Ok(status) if status.success() => Ok(()),
-            Ok(status) => Err(Failure::at(
-                "child_exit",
-                None,
-                format!("{} exited with {status}", self.label),
-            )),
-            Err(e) => Err(Failure::at(
-                "child_exit",
-                None,
-                format!("failed to wait for {}: {e}", self.label),
-            )),
+    /// Close the input and require a clean exit within `timeout`.
+    fn shutdown(&mut self, timeout: Duration) -> Result<(), Failure> {
+        self.writes = None;
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) if status.success() => return Ok(()),
+                Ok(Some(status)) => {
+                    return Err(Failure::at(
+                        Kind::ChildExit,
+                        None,
+                        format!("{} exited with {status}", self.label),
+                    ));
+                }
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Ok(None) => {
+                    return Err(Failure::at(
+                        Kind::Timeout,
+                        None,
+                        format!(
+                            "{} did not exit within {}ms",
+                            self.label,
+                            timeout.as_millis()
+                        ),
+                    ));
+                }
+                Err(e) => {
+                    return Err(Failure::at(
+                        Kind::ChildExit,
+                        None,
+                        format!("failed to wait for {}: {e}", self.label),
+                    ));
+                }
+            }
         }
     }
 }
@@ -323,7 +421,129 @@ fn action_name(action: &Value) -> String {
     }
 }
 
-fn run(options: &Options) -> Result<Report, (Failure, Report)> {
+/// Everything one action needs: the two children, the artifacts being written,
+/// and the last trustworthy snapshot.
+struct Session {
+    trace: File,
+    images: PathBuf,
+    emulator: LineProcess,
+    agent: LineProcess,
+    last: Value,
+}
+
+impl Session {
+    /// Ask the agent for one action, apply it, and record what happened.
+    /// Returns the action's short name and its resulting display.
+    fn turn(
+        &mut self,
+        index: usize,
+        options: &Options,
+    ) -> Result<(String, Vec<Vec<bool>>), Failure> {
+        self.agent
+            .send(&json!({"index": index, "snapshot": self.last}), options.timeout, Some(index))?;
+        let reply = self.agent.receive(options.timeout, Some(index))?;
+        let reply: Value = serde_json::from_str(&reply).map_err(|e| {
+            Failure::at(
+                Kind::MalformedResponse,
+                Some(index),
+                format!("agent sent invalid JSON ({e}): {reply}"),
+            )
+        })?;
+        let action = reply.get("action").cloned().ok_or(Failure::at(
+            Kind::MalformedResponse,
+            Some(index),
+            "agent reply has no action",
+        ))?;
+
+        let response =
+            self.emulator
+                .request(&json!({"action": action}), options.timeout, Some(index))?;
+        if let Some(error) = response.get("error") {
+            return Err(Failure::at(
+                Kind::EmulatorError,
+                Some(index),
+                format!("emulator reported {error}"),
+            ));
+        }
+        if response.get("action") != Some(&action) {
+            let actual = response.get("action").cloned().unwrap_or(Value::Null);
+            return Err(Failure::at(
+                Kind::MismatchedResponse,
+                Some(index),
+                format!("asked for {action} but emulator answered {actual}"),
+            ));
+        }
+
+        let display = display_image::display_from_snapshot(&response["snapshot"])
+            .map_err(|e| Failure::at(Kind::MalformedResponse, Some(index), e))?;
+        display_image::write_png(&self.images.join(format!("{index:04}.png")), &display)
+            .map_err(|e| Failure::at(Kind::MalformedResponse, Some(index), e))?;
+
+        let entry = json!({
+            "index": index,
+            "action": action,
+            "response": response,
+        });
+        writeln!(self.trace, "{entry}")
+            .and_then(|_| self.trace.flush())
+            .map_err(|e| {
+                Failure::at(
+                    Kind::MalformedResponse,
+                    Some(index),
+                    format!("failed to write trace: {e}"),
+                )
+            })?;
+
+        self.last = response["snapshot"].clone();
+        Ok((action_name(&action), display))
+    }
+}
+
+/// Create the output layout and start both children.
+fn prepare(options: &Options, program: &[u8]) -> Result<Session, String> {
+    std::fs::create_dir_all(&options.output)
+        .map_err(|e| format!("failed to create {}: {e}", options.output.display()))?;
+    let images = options.output.join("display");
+    std::fs::create_dir_all(&images)
+        .map_err(|e| format!("failed to create {}: {e}", images.display()))?;
+    let trace = File::create(options.output.join("trace.jsonl"))
+        .map_err(|e| format!("failed to create trace: {e}"))?;
+
+    let emulator_program = match &options.emulator {
+        Some(path) => path.clone(),
+        None => sibling("chip8-agent")?,
+    };
+    let mut emulator = LineProcess::spawn("chip8-agent", &mut Command::new(emulator_program))?;
+    let loaded = emulator
+        .request(
+            &json!({"action": {"type": "load", "at": PROGRAM_ORIGIN, "bytes": program}}),
+            options.timeout,
+            None,
+        )
+        .map_err(|failure| failure.to_string())?;
+    if let Some(error) = loaded.get("error") {
+        return Err(format!("emulator rejected the ROM: {error}"));
+    }
+
+    let agent_program = match &options.agent {
+        Some(path) => path.clone(),
+        None => sibling("chip8-random-agent")?,
+    };
+    let agent = LineProcess::spawn(
+        "agent",
+        Command::new(agent_program).env(SEED_VARIABLE, options.seed.to_string()),
+    )?;
+
+    Ok(Session {
+        trace,
+        images,
+        emulator,
+        agent,
+        last: loaded["snapshot"].clone(),
+    })
+}
+
+fn run(options: &Options) -> Result<Report, Report> {
     let mut report = Report {
         output: options.output.clone(),
         seed: options.seed,
@@ -340,84 +560,45 @@ fn run(options: &Options) -> Result<Report, (Failure, Report)> {
     let program = match std::fs::read(&options.rom) {
         Ok(program) => program,
         Err(e) => {
-            let failure = Failure::at(
-                "emulator_error",
-                None,
+            report.fail(
+                Kind::EmulatorError,
                 format!("failed to read {}: {e}", options.rom.display()),
             );
-            return Err((failure, report));
+            return Err(report);
         }
     };
     report.rom_sha256 = hex(&Sha256::digest(&program));
     report.program_len = program.len();
     if usize::from(PROGRAM_ORIGIN) + program.len() > 4096 {
-        let failure = Failure::at(
-            "emulator_error",
-            None,
+        report.fail(
+            Kind::EmulatorError,
             format!(
                 "{} does not fit in memory above {PROGRAM_ORIGIN:#x}",
                 options.rom.display()
             ),
         );
-        return Err((failure, report));
+        return Err(report);
     }
 
-    let prepare = || -> Result<(File, PathBuf, LineProcess, LineProcess, Value), String> {
-        std::fs::create_dir_all(&options.output)
-            .map_err(|e| format!("failed to create {}: {e}", options.output.display()))?;
-        let images = options.output.join("display");
-        std::fs::create_dir_all(&images)
-            .map_err(|e| format!("failed to create {}: {e}", images.display()))?;
-        let trace = File::create(options.output.join("trace.jsonl"))
-            .map_err(|e| format!("failed to create trace: {e}"))?;
-
-        let emulator_program = match &options.emulator {
-            Some(path) => path.clone(),
-            None => sibling("chip8-agent")?,
-        };
-        let mut emulator = LineProcess::spawn("chip8-agent", &mut Command::new(emulator_program))?;
-        let loaded = emulator
-            .request(
-                &json!({"action": {"type": "load", "at": PROGRAM_ORIGIN, "bytes": program}}),
-                options.timeout,
-                None,
-            )
-            .map_err(|failure| format!("{failure}"))?;
-        if let Some(error) = loaded.get("error") {
-            return Err(format!("emulator rejected the ROM: {error}"));
-        }
-
-        let agent_program = match &options.agent {
-            Some(path) => path.clone(),
-            None => sibling("chip8-random-agent")?,
-        };
-        let agent = LineProcess::spawn(
-            "agent",
-            Command::new(agent_program).env(SEED_VARIABLE, options.seed.to_string()),
-        )?;
-        Ok((trace, images, emulator, agent, loaded["snapshot"].clone()))
-    };
-
-    let (mut trace, images, mut emulator, mut agent, mut last) = match prepare() {
-        Ok(prepared) => prepared,
+    let mut session = match prepare(options, &program) {
+        Ok(session) => session,
         Err(detail) => {
-            return Err((
-                Failure::at("emulator_error", None, format!("setup failed: {detail}")),
-                report,
-            ));
+            report.fail(Kind::EmulatorError, format!("setup failed: {detail}"));
+            return Err(report);
         }
     };
-    report.last = last.clone();
+    report.last = session.last.clone();
 
     let mut viewer = if options.view {
         let title = format!("CHIP-8 run - {}", options.rom.display());
         match RunViewer::new(10, &title) {
             Ok(viewer) => Some(viewer),
             Err(e) => {
-                return Err((
-                    Failure::at("emulator_error", None, format!("failed to open the viewer: {e}")),
-                    report,
-                ));
+                report.fail(
+                    Kind::EmulatorError,
+                    format!("failed to open the viewer: {e}"),
+                );
+                return Err(report);
             }
         }
     } else {
@@ -425,69 +606,9 @@ fn run(options: &Options) -> Result<Report, (Failure, Report)> {
     };
 
     for index in 0..options.actions {
-        let outcome = (|| -> Result<(Value, Vec<Vec<bool>>, String), Failure> {
-            agent.send(&json!({"index": index, "snapshot": last}), Some(index))?;
-            let reply = agent.receive(options.timeout, Some(index))?;
-            let reply: Value = serde_json::from_str(&reply).map_err(|e| {
-                Failure::at(
-                    "malformed_response",
-                    Some(index),
-                    format!("agent sent invalid JSON ({e}): {reply}"),
-                )
-            })?;
-            let action = reply.get("action").cloned().ok_or(Failure::at(
-                "malformed_response",
-                Some(index),
-                "agent reply has no action",
-            ))?;
-
-            let response =
-                emulator.request(&json!({"action": action}), options.timeout, Some(index))?;
-            if let Some(error) = response.get("error") {
-                return Err(Failure::at(
-                    "emulator_error",
-                    Some(index),
-                    format!("emulator reported {error}"),
-                ));
-            }
-            if response.get("action") != Some(&action) {
-                let actual = response.get("action").cloned().unwrap_or(Value::Null);
-                return Err(Failure::at(
-                    "mismatched_response",
-                    Some(index),
-                    format!("asked for {action} but emulator answered {actual}"),
-                ));
-            }
-            let display = display_image::display_from_snapshot(&response["snapshot"])
-                .map_err(|e| Failure::at("malformed_response", Some(index), e))?;
-            display_image::write_png(&images.join(format!("{index:04}.png")), &display)
-                .map_err(|e| Failure::at("malformed_response", Some(index), e))?;
-
-            let entry = json!({
-                "index": index,
-                "action": action,
-                "response": response,
-            });
-            writeln!(trace, "{entry}")
-                .and_then(|_| trace.flush())
-                .map_err(|e| {
-                    Failure::at(
-                        "malformed_response",
-                        Some(index),
-                        format!("failed to write trace: {e}"),
-                    )
-                })?;
-            Ok((
-                response["snapshot"].clone(),
-                display,
-                action_name(&action),
-            ))
-        })();
-
-        match outcome {
-            Ok((snapshot, display, latest)) => {
-                last = snapshot.clone();
-                report.last = snapshot;
+        match session.turn(index, options) {
+            Ok((latest, display)) => {
+                report.last = session.last.clone();
                 report.completed += 1;
                 // Closing the window only stops watching; the run continues.
                 if let Some(open) = viewer.as_mut().filter(|viewer| viewer.is_open()) {
@@ -503,18 +624,23 @@ fn run(options: &Options) -> Result<Report, (Failure, Report)> {
                 }
             }
             Err(failure) => {
-                report.failure = Some(failure.clone());
-                return Err((failure, report));
+                report.failure = Some(failure);
+                return Err(report);
             }
         }
     }
 
-    if let Err(failure) = agent.shutdown().and_then(|_| emulator.shutdown()) {
-        report.failure = Some(failure.clone());
-        return Err((failure, report));
+    if let Err(failure) = session
+        .agent
+        .shutdown(options.timeout)
+        .and_then(|_| session.emulator.shutdown(options.timeout))
+    {
+        report.failure = Some(failure);
+        return Err(report);
     }
     Ok(report)
 }
+
 
 fn main() {
     let options = match parse(std::env::args().skip(1).collect()) {
@@ -535,11 +661,13 @@ fn main() {
                 report.seed, report.completed, report.rom_sha256
             );
         }
-        Err((failure, report)) => {
+        Err(report) => {
             if let Err(error) = report.write() {
                 eprintln!("{error}");
             }
-            eprintln!("{failure}");
+            if let Some(failure) = &report.failure {
+                eprintln!("{failure}");
+            }
             std::process::exit(1);
         }
     }
