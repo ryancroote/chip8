@@ -2,7 +2,8 @@
 
 `chip8-agent` is a headless process that uses the same emulator operations as
 instruction tests. It opens no window and does not read the clock or a physical
-keyboard. The graphical executable remains `chip8`.
+keyboard. The graphical executable remains `chip8`; the only other binary that
+opens a window is `chip8-explore`, and only when asked to with `--view`.
 
 ## Live control
 
@@ -102,10 +103,115 @@ promotion command do not imply human approval of generated snapshots. Only the
 repository's documented [CHIP-8 profile](chip8-opcodes.md) is supported; no
 third-party reference emulator or autonomous gameplay strategy is included.
 
+## Exploratory runs
+
+An **exploratory run** lets an autonomous agent drive a ROM through varying
+interactions and leaves the evidence behind for inspection. One run uses one
+fixed ROM, one seed, and one action budget:
+
+```sh
+cargo build --bins
+target/debug/chip8-explore \
+  --rom ibm.ch8 --seed 7 --actions 200 --output runs/ibm
+```
+
+| Option | Meaning |
+| --- | --- |
+| `--rom PATH` | The program to run. It is loaded at `0x200` by the harness, not by the agent. |
+| `--seed N` | Seeds the agent, so the same ROM and seed repeat exactly. |
+| `--actions N` | Action budget. Reaching it is a successful run. |
+| `--output DIR` | Where the run's artifacts go. Created if missing. |
+| `--agent PROGRAM` | Replace the bundled agent with another program. |
+| `--emulator PROGRAM` | Replace `chip8-agent`, e.g. to test the harness itself. |
+| `--timeout-ms MS` | How long one reply may take before the run stops. Default 5000. |
+| `--view` | Open a live window. Off by default. |
+| `--delay-ms MS` | Pause between actions for watchable pacing. Default 0. |
+
+By default the harness starts `chip8-agent` and `chip8-random-agent` from the
+directory containing `chip8-explore`, so build both binaries first. Exit status
+is zero for a run that completes its budget and nonzero when it stops early;
+setup problems report on stderr and exit `2` for usage errors.
+
+### The agent boundary
+
+The harness owns both processes. It loads the ROM into `chip8-agent`, then for
+each turn:
+
+1. writes one JSON line to the agent: `{"index":0,"snapshot":{...}}`, carrying
+the complete machine snapshot;
+2. reads one JSON line back: `{"action":{"type":"step"}}`;
+3. forwards that action to `chip8-agent` and keeps the response.
+
+The agent receives the run seed in `CHIP8_RUN_SEED`. Any program that speaks
+this line protocol can replace the bundled agent, including an LLM-driven one;
+the harness never inspects the snapshot on the agent's behalf. The bundled
+`chip8-random-agent` chooses only `step`, `inspect`, `key`, and `tick`, so the
+loaded program stays in place for the whole run.
+
+### What a run leaves behind
+
+```text
+runs/ibm/
+  summary.json     status, seed, ROM SHA-256, action counts, pacing settings
+  trace.jsonl      one line per action: index, action, full response
+  display/0000.png one enlarged monochrome image per action
+```
+
+The summary stays small and also records `viewer` and `delay_ms`, so a run's
+pacing settings are visible after the fact. Images are `8`x enlarged, so each
+CHIP-8 pixel is a distinct 8x8 block. Artifacts are kept for successful and
+failed runs alike; full per-action state lives in the trace, not the summary.
+
+### When a run stops early
+
+The run stops at the first unexpected event and exits nonzero, naming the
+action index and the kind of event on stderr:
+
+| Kind | Meaning |
+| --- | --- |
+| `emulator_error` | `chip8-agent` answered with an error, or setup failed. |
+| `malformed_response` | A reply was not JSON, or carried no usable action or display. |
+| `mismatched_response` | A reply answered a different action than the one sent. |
+| `child_exit` | The agent or the emulator exited before replying, or exited nonzero at the end. |
+| `timeout` | The agent or the emulator did not reply, or stopped accepting input, within `--timeout-ms`. |
+
+Failure evidence is never discarded: the summary gains a `failure` object with
+`kind`, `index`, and `detail`, plus a `last_snapshot` holding the last
+trustworthy snapshot; the trace and images keep everything written before the
+failure. Only failed summaries carry `last_snapshot`, which is why successful
+ones stay small.
+The run never continues past a failure, because a core fault can leave the
+emulator's internal state partially changed.
+
+### Watching a run
+
+`--view` opens a separate window fed from the same post-action snapshots, so it
+shows what the run actually observed; the graphical `chip8` executable is not
+involved. The window shows the display, a strip tracking progress through the
+budget, and a title with the action count and the action just taken. Use
+`--delay-ms` to pace actions for watching; without it actions run as fast as
+the two processes allow. Closing the window stops watching but does not abort
+the run, and runs without `--view` need no graphical environment at all.
+
+### What a successful run does not prove
+
+The bundled agent picks random valid actions. It has no strategy, no goal, and
+no reference model of the program it is running, so a run that reaches its
+budget means the emulator answered every request consistently — not that the ROM
+behaved correctly. Treat exploratory runs as a way to surface suspicious state
+and rendering, then confirm anything interesting with instruction tests or a
+reviewed fixture.
+
 ## Tests
 
 Run `cargo test`. Subprocess tests cover the public JSON interface and fixture
 workflow; existing direct-state tests cover instruction semantics.
+
+`tests/explore.rs` covers the exploratory run command line: seeded repeatability,
+the agent process boundary, per-action images, early-stop failure kinds
+(including a child that stops reading or answering), and pacing that does not
+change what the agent chooses. The live window itself is
+verified by hand, since opening one has no place in an automated suite.
 
 If the local macOS linker rejects the selected SDK's `arm64e.x1` stubs, an
 installed compatible SDK can be selected without changing the repository:
