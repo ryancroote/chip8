@@ -211,3 +211,126 @@ fn every_action_leaves_a_display_image_matching_its_snapshot() {
         assert_eq!(std::fs::read(first).unwrap(), std::fs::read(second).unwrap());
     }
 }
+
+fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    path
+}
+
+/// Run an agent that misbehaves in one specific way and assert the run stops
+/// immediately with usable evidence.
+fn assert_failure(agent_body: &str, kind: &str, completed: u64, timeout_ms: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let rom = rom(dir.path());
+    let agent = script(dir.path(), "agent.sh", agent_body);
+    let run = explore(
+        dir.path(),
+        "run",
+        &rom,
+        &[
+            "--agent",
+            agent.to_str().unwrap(),
+            "--timeout-ms",
+            timeout_ms,
+        ],
+    );
+    assert!(!run.status.success(), "run should fail: {kind}");
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains(kind),
+        "stderr should name the failure kind: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let summary = summary(dir.path(), "run");
+    assert_eq!(summary["status"], "failed");
+    assert_eq!(summary["failure"]["kind"], kind);
+    assert_eq!(summary["seed"], 42);
+    assert_eq!(summary["rom_sha256"], LOOP_ROM_SHA256);
+    assert_eq!(summary["actions"], completed);
+    assert_eq!(summary["failure"]["index"], completed);
+    assert!(summary["last_snapshot"]["display"].is_array());
+    assert_eq!(trace(dir.path(), "run").len() as u64, completed);
+    assert_eq!(images(dir.path(), "run").len() as u64, completed);
+}
+
+#[test]
+fn unexpected_agent_responses_stop_the_run_and_keep_evidence() {
+    // Replies that are not JSON.
+    assert_failure(
+        "while IFS= read -r line; do echo 'not json'; done",
+        "malformed_response",
+        0,
+        "5000",
+    );
+    // JSON that carries no action.
+    assert_failure(
+        "while IFS= read -r line; do echo '{\"snapshot\":1}'; done",
+        "malformed_response",
+        0,
+        "5000",
+    );
+    // Answers once, then exits without answering the second turn.
+    assert_failure(
+        "head -n 1 >/dev/null; echo '{\"action\":{\"type\":\"step\"}}'; exit 3",
+        "child_exit",
+        1,
+        "5000",
+    );
+    // Stops responding entirely.
+    assert_failure(
+        "while IFS= read -r line; do sleep 5; done",
+        "timeout",
+        0,
+        "200",
+    );
+}
+
+#[test]
+fn an_emulator_error_response_stops_the_run() {
+    assert_failure(
+        "while IFS= read -r line; do echo '{\"action\":{\"type\":\"key\",\"key\":99,\"pressed\":true}}'; done",
+        "emulator_error",
+        0,
+        "5000",
+    );
+}
+
+#[test]
+fn a_response_that_does_not_match_the_request_stops_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let rom = rom(dir.path());
+    // Answers the ROM load, then always claims a `tick` regardless of the request.
+    let emulator = script(
+        dir.path(),
+        "emulator.sh",
+        "n=0\nwhile IFS= read -r line; do\n  if [ \"$n\" -eq 0 ]; then printf '%s\\n' '{\"index\":0,\"action\":{\"type\":\"load\"},\"snapshot\":{\"pc\":512}}'; else printf '%s\\n' '{\"index\":1,\"action\":{\"type\":\"tick\"},\"snapshot\":{\"pc\":512}}'; fi\n  n=$((n+1))\ndone",
+    );
+    let agent = script(
+        dir.path(),
+        "agent.sh",
+        "while IFS= read -r line; do echo '{\"action\":{\"type\":\"step\"}}'; done",
+    );
+    let run = explore(
+        dir.path(),
+        "run",
+        &rom,
+        &[
+            "--agent",
+            agent.to_str().unwrap(),
+            "--emulator",
+            emulator.to_str().unwrap(),
+            "--timeout-ms",
+            "5000",
+        ],
+    );
+    assert!(!run.status.success());
+    let summary = summary(dir.path(), "run");
+    assert_eq!(summary["failure"]["kind"], "mismatched_response");
+    assert_eq!(summary["failure"]["index"], 0);
+}
