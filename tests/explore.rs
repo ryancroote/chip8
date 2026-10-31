@@ -129,3 +129,85 @@ fn the_agent_is_a_separate_process_that_sees_every_full_snapshot() {
     }
     assert_eq!(trace(dir.path(), "custom").len(), 8);
 }
+
+/// Scale factor between one CHIP-8 pixel and one PNG pixel.
+const SCALE: usize = 8;
+
+/// Decode a display image into 64x32 booleans, requiring every CHIP-8 pixel to
+/// be a uniform block of one grayscale value.
+fn decode_image(path: &Path) -> Vec<Vec<bool>> {
+    let decoder = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path).unwrap()));
+    let mut reader = decoder.read_info().unwrap();
+    let mut buffer = vec![0; reader.output_buffer_size().unwrap()];
+    let info = reader.next_frame(&mut buffer).unwrap();
+    assert_eq!(info.width as usize, 64 * SCALE);
+    assert_eq!(info.height as usize, 32 * SCALE);
+    assert_eq!(info.color_type, png::ColorType::Grayscale);
+    let mut display = vec![vec![false; 64]; 32];
+    for (row, columns) in display.iter_mut().enumerate() {
+        for (column, pixel) in columns.iter_mut().enumerate() {
+            let mut value = None;
+            for y in 0..SCALE {
+                for x in 0..SCALE {
+                    let at = (row * SCALE + y) * (64 * SCALE) + column * SCALE + x;
+                    let sample = buffer[at];
+                    assert!(sample == 0 || sample == 255, "non-monochrome pixel");
+                    match value {
+                        None => value = Some(sample),
+                        Some(known) => assert_eq!(known, sample, "ragged pixel block"),
+                    }
+                }
+            }
+            *pixel = value == Some(255);
+        }
+    }
+    display
+}
+
+fn snapshot_display(entry: &Value) -> Vec<Vec<bool>> {
+    entry["response"]["snapshot"]["display"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            row.as_array()
+                .unwrap()
+                .iter()
+                .map(|pixel| pixel.as_bool().unwrap())
+                .collect()
+        })
+        .collect()
+}
+
+fn images(dir: &Path, name: &str) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir.join(name).join("display"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    paths.sort();
+    paths
+}
+
+#[test]
+fn every_action_leaves_a_display_image_matching_its_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let rom = rom(dir.path());
+    assert!(explore(dir.path(), "first", &rom, &[]).status.success());
+    assert!(explore(dir.path(), "second", &rom, &[]).status.success());
+
+    let trace = trace(dir.path(), "first");
+    let first_images = images(dir.path(), "first");
+    assert_eq!(first_images.len(), trace.len(), "one image per action");
+
+    for (entry, path) in trace.iter().zip(&first_images) {
+        assert_eq!(
+            path.file_name().unwrap().to_str().unwrap(),
+            format!("{:04}.png", entry["index"].as_u64().unwrap())
+        );
+        assert_eq!(decode_image(path), snapshot_display(entry));
+    }
+
+    for (first, second) in first_images.iter().zip(images(dir.path(), "second")) {
+        assert_eq!(std::fs::read(first).unwrap(), std::fs::read(second).unwrap());
+    }
+}

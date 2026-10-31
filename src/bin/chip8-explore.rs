@@ -1,6 +1,7 @@
 //! One exploratory run: mediate between the headless emulator process and an
 //! autonomous agent process, then leave a summary and an ordered trace behind.
 
+use chip8::display_image;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs::File;
@@ -150,6 +151,8 @@ fn run(options: &Options) -> Result<Value, String> {
     }
     std::fs::create_dir_all(&options.output)
         .map_err(|e| format!("failed to create {}: {e}", options.output.display()))?;
+    let images = options.output.join("display");
+    std::fs::create_dir_all(&images).map_err(|e| format!("failed to create {}: {e}", images.display()))?;
     let mut trace = File::create(options.output.join("trace.jsonl"))
         .map_err(|e| format!("failed to create trace: {e}"))?;
 
@@ -198,6 +201,8 @@ fn run(options: &Options) -> Result<Value, String> {
         writeln!(trace, "{entry}")
             .and_then(|_| trace.flush())
             .map_err(|e| format!("failed to write trace: {e}"))?;
+        let display = display_image::display_from_snapshot(&response["snapshot"])?;
+        display_image::write_png(&images.join(format!("{index:04}.png")), &display)?;
         last = response["snapshot"].clone();
         completed += 1;
     }

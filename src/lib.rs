@@ -4,4 +4,5 @@
 //! `tests/` live fully outside the emulator module.
 
 pub mod chip8;
+pub mod display_image;
 pub mod renderer;
