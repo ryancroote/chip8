@@ -32,6 +32,48 @@ fn command(args: &[&str]) -> std::process::Output {
 }
 
 #[test]
+fn agent_responds_before_eof_and_rejects_malformed_requests() {
+    use std::io::BufRead;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_chip8-agent"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+    writeln!(input, "{}", json!({"action":{"type":"inspect"}})).unwrap();
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&line).unwrap()["snapshot"]["pc"],
+        512
+    );
+    writeln!(input, "not json").unwrap();
+    line.clear();
+    output.read_line(&mut line).unwrap();
+    let failure: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(failure["index"], 1);
+    assert_eq!(failure["last_snapshot"]["pc"], 512);
+    assert!(!child.wait().unwrap().success());
+}
+
+#[test]
+fn checkpoints_reject_extra_fields_and_failures_do_not_echo_stale_observations() {
+    let snapshot = agent(&[json!({"action":{"type":"inspect"}})]).1[0]["snapshot"].clone();
+    let mut extra = snapshot.clone();
+    extra["unknown"] = Value::Null;
+    assert!(!agent(&[json!({"action":{"type":"inspect"},"checkpoint":true,"expected":extra})]).0);
+    let (ok, trace) =
+        agent(&[json!({"action":{"type":"load","bytes":[1,2],"at":4095},"snapshot":snapshot})]);
+    assert!(!ok);
+    assert!(trace[0]["snapshot"].is_null());
+    assert!(trace[0]["last_snapshot"].is_null());
+    assert!(!agent(&[json!({"action":{"type":"inspect"},"checkpoint":true})]).0);
+    assert!(!agent(&[json!({"action":{"type":"inspect","typo":true}})]).0);
+}
+
+#[test]
 fn documented_scenario_records_promotes_and_replays() {
     let dir = tempfile::tempdir().unwrap();
     let candidate = dir.path().join("candidate.json");
@@ -104,6 +146,34 @@ fn recording_requires_separate_candidates_and_explicit_promotion() {
         std::fs::read(approved).unwrap(),
         std::fs::read(candidate).unwrap()
     );
+    let next = dir.path().join("next.json");
+    let next = next.to_str().unwrap();
+    let mut changed: Value = serde_json::from_str(&input).unwrap();
+    changed["actions"][1]["action"]["seed"] = json!(2);
+    std::fs::write(source, changed.to_string()).unwrap();
+    assert!(command(&["record", source, next]).status.success());
+    let review = command(&["review", next, approved]);
+    assert!(review.status.success());
+    assert!(
+        String::from_utf8(review.stdout)
+            .unwrap()
+            .contains("random_state")
+    );
+    assert!(!command(&["promote", next, approved]).status.success());
+    assert_eq!(
+        std::fs::read(approved).unwrap(),
+        std::fs::read(candidate).unwrap()
+    );
+    assert!(
+        command(&["promote", next, approved, "--replace"])
+            .status
+            .success()
+    );
+    assert_eq!(
+        std::fs::read(approved).unwrap(),
+        std::fs::read(next).unwrap()
+    );
+    assert!(command(&["replay", approved]).status.success());
 }
 
 #[test]

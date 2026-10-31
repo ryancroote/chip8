@@ -7,11 +7,11 @@ use std::io::{self, BufRead, Write};
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum Action {
     Load { bytes: Vec<u8>, at: u16 },
-    Step,
-    Inspect,
-    Reset,
+    Step {},
+    Inspect {},
+    Reset {},
     Seed { seed: u32 },
-    Tick,
+    Tick {},
     Key { key: u8, pressed: bool },
 }
 
@@ -51,12 +51,16 @@ fn differences(expected: &Value, actual: &Value, path: &str, out: &mut Vec<Strin
         (Value::Object(a), Value::Object(b)) => {
             let keys: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).collect();
             for key in keys {
-                differences(
-                    a.get(key).unwrap_or(&Value::Null),
-                    b.get(key).unwrap_or(&Value::Null),
-                    &format!("{path}/{key}"),
-                    out,
-                );
+                match (a.get(key), b.get(key)) {
+                    (Some(a), Some(b)) => differences(a, b, &format!("{path}/{key}"), out),
+                    (Some(a), None) => {
+                        out.push(format!("{path}/{key}: expected {a}, actual <missing>"))
+                    }
+                    (None, Some(b)) => {
+                        out.push(format!("{path}/{key}: expected <missing>, actual {b}"))
+                    }
+                    (None, None) => unreachable!(),
+                }
             }
         }
         (Value::Array(a), Value::Array(b)) if a.len() == b.len() => {
@@ -82,6 +86,8 @@ impl Session {
     }
 
     fn apply(&mut self, index: usize, request: &mut Request, record: bool) -> Result<(), String> {
+        // Recorded observations are untrusted input, never the current result.
+        request.snapshot = None;
         let result = (|| {
             if !record && request.checkpoint && request.expected.is_none() {
                 return Err("checkpoint requires expected snapshot".into());
@@ -136,13 +142,13 @@ fn execute(state: &mut State, action: &Action) -> Result<(), String> {
         // The core currently panics on some malformed-ROM memory accesses.
         // Contain those faults at the process boundary and stop the trace;
         // never continue execution with the partially mutated state.
-        Action::Step => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| state.step()))
+        Action::Step {} => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| state.step()))
             .map_err(|_| "emulator fault during instruction execution".to_string())?
             .map_err(|e| format!("{e:?}"))?,
-        Action::Inspect => {}
-        Action::Reset => *state = State::new(),
+        Action::Inspect {} => {}
+        Action::Reset {} => *state = State::new(),
         Action::Seed { seed } => state.seed_random(*seed),
-        Action::Tick => state.tick_timers(),
+        Action::Tick {} => state.tick_timers(),
         Action::Key { key, pressed } => {
             let keys = [
                 KeyInput::Zero,
