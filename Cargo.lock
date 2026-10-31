@@ -49,6 +49,7 @@ dependencies = [
  "minifb",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

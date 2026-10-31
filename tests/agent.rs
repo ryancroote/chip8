@@ -24,6 +24,42 @@ fn agent(input: &[Value]) -> (bool, Vec<Value>) {
     )
 }
 
+fn command(args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_chip8-agent"))
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn fixtures_compare_only_explicit_checkpoints_and_stop_at_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trace.json");
+    let snapshot = agent(&[json!({"action":{"type":"inspect"}})]).1[0]["snapshot"].clone();
+    let mut fixture = json!({"version":1,"actions":[
+        {"action":{"type":"inspect"}},
+        {"action":{"type":"reset"},"checkpoint":true,"expected":snapshot},
+        {"action":{"type":"inspect"}}
+    ]});
+    std::fs::write(&path, fixture.to_string()).unwrap();
+    let result = command(&["replay", path.to_str().unwrap()]);
+    assert!(result.status.success(), "{:?}", result);
+    assert_eq!(String::from_utf8(result.stdout).unwrap().lines().count(), 3);
+    fixture["actions"][1]["expected"]["random_state"] = json!(99);
+    std::fs::write(&path, fixture.to_string()).unwrap();
+    let result = command(&["replay", path.to_str().unwrap()]);
+    assert!(!result.status.success());
+    let lines: Vec<Value> = String::from_utf8(result.stdout)
+        .unwrap()
+        .lines()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[1]["index"], 1);
+    assert!(lines[1]["error"].as_str().unwrap().contains("random_state"));
+    assert_eq!(lines[1]["last_snapshot"], lines[0]["snapshot"]);
+}
+
 #[test]
 fn keypad_timers_and_seeded_randomness_are_explicit_and_reproducible() {
     let actions = vec![
