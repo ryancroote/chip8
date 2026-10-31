@@ -193,6 +193,76 @@ fn live() -> Result<(), String> {
     Ok(())
 }
 
+fn record(source: &str, candidate: &str) -> Result<(), String> {
+    let mut fixture = read_fixture(source)?;
+    // create_new rejects existing files, symlinks and hard-link aliases alike.
+    // Reserve the output before execution, but remove it if execution fails.
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(candidate)
+        .map_err(|e| e.to_string())?;
+    let result = (|| {
+        let mut session = Session::new();
+        for (index, request) in fixture.actions.iter_mut().enumerate() {
+            session.apply(index, request, true)?;
+        }
+        let text = serde_json::to_string_pretty(&fixture).map_err(|e| e.to_string())? + "\n";
+        output.write_all(text.as_bytes()).map_err(|e| e.to_string())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(candidate);
+    }
+    result
+}
+
+fn review(candidate: &str, approved: &str) -> Result<(), String> {
+    let candidate = serde_json::to_value(read_fixture(candidate)?).map_err(|e| e.to_string())?;
+    match std::fs::read(approved) {
+        Ok(bytes) => {
+            let previous: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+            let mut diff = Vec::new();
+            differences(&previous, &candidate, "fixture", &mut diff);
+            emit(&json!({"differences":diff}))
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            emit(&json!({"initial":true,"candidate":candidate}))
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn promote(candidate: &str, approved: &str) -> Result<(), String> {
+    let fixture = read_fixture(candidate)?;
+    if !fixture.actions.iter().any(|r| r.checkpoint) {
+        return Err("promotion requires at least one checkpoint".into());
+    }
+    for request in &fixture.actions {
+        if request.snapshot.is_none()
+            || (request.checkpoint && request.expected != request.snapshot)
+            || (!request.checkpoint && request.expected.is_some())
+        {
+            return Err("promotion requires a complete recorded candidate".into());
+        }
+    }
+    let destination = std::path::Path::new(approved);
+    if destination.exists()
+        && std::fs::canonicalize(candidate).ok() == std::fs::canonicalize(destination).ok()
+    {
+        return Err("candidate and approved fixture must differ".into());
+    }
+    let parent = destination
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
+    let text = serde_json::to_string_pretty(&fixture).map_err(|e| e.to_string())? + "\n";
+    temp.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+    temp.as_file().sync_all().map_err(|e| e.to_string())?;
+    temp.persist(destination).map_err(|e| e.to_string())?;
+    emit(&json!({"promoted":approved}))
+}
+
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
@@ -205,7 +275,10 @@ fn run() -> Result<(), String> {
             }
             Ok(())
         }
-        _ => Err("usage: chip8-agent [replay FIXTURE]".into()),
+        [mode, source, candidate] if mode == "record" => record(source, candidate),
+        [mode, candidate, approved] if mode == "review" => review(candidate, approved),
+        [mode, candidate, approved, flag] if mode == "promote" && flag == "--replace" => promote(candidate, approved),
+        _ => Err("usage: chip8-agent [replay FIXTURE | record SOURCE NEW_CANDIDATE | review CANDIDATE APPROVED | promote CANDIDATE APPROVED --replace]".into()),
     }
 }
 

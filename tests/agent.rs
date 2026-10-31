@@ -32,6 +32,52 @@ fn command(args: &[&str]) -> std::process::Output {
 }
 
 #[test]
+fn recording_requires_separate_candidates_and_explicit_promotion() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.json");
+    let candidate = dir.path().join("candidate.json");
+    let approved = dir.path().join("approved.json");
+    let source = source.to_str().unwrap();
+    let candidate = candidate.to_str().unwrap();
+    let approved = approved.to_str().unwrap();
+    let input = json!({"version":1,"actions":[
+        {"action":{"type":"reset"}},
+        {"action":{"type":"seed","seed":1}},
+        {"action":{"type":"load","bytes":[192,255],"at":512}},
+        {"action":{"type":"step"},"checkpoint":true}
+    ]})
+    .to_string();
+    std::fs::write(source, &input).unwrap();
+    assert!(command(&["record", source, candidate]).status.success());
+    assert_eq!(std::fs::read_to_string(source).unwrap(), input);
+    let recorded: Value = serde_json::from_slice(&std::fs::read(candidate).unwrap()).unwrap();
+    assert_eq!(recorded["actions"][3]["expected"]["v"][0], 33);
+    assert!(!recorded["actions"][0]["snapshot"].is_null());
+    assert!(!command(&["record", source, source]).status.success());
+    assert!(!command(&["record", source, candidate]).status.success());
+    assert!(!command(&["promote", candidate, approved]).status.success());
+    assert!(!std::path::Path::new(approved).exists());
+    let review = command(&["review", candidate, approved]);
+    assert!(review.status.success());
+    assert!(
+        String::from_utf8(review.stdout)
+            .unwrap()
+            .contains("initial")
+    );
+    assert!(
+        command(&["promote", candidate, approved, "--replace"])
+            .status
+            .success()
+    );
+    assert!(command(&["replay", approved]).status.success());
+    assert!(!command(&["record", source, approved]).status.success());
+    assert_eq!(
+        std::fs::read(approved).unwrap(),
+        std::fs::read(candidate).unwrap()
+    );
+}
+
+#[test]
 fn fixtures_compare_only_explicit_checkpoints_and_stop_at_mismatch() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("trace.json");
