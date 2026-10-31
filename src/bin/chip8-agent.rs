@@ -1,4 +1,4 @@
-use chip8::chip8::State;
+use chip8::chip8::{KeyInput, State};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
@@ -10,6 +10,9 @@ enum Action {
     Step,
     Inspect,
     Reset,
+    Seed { seed: u32 },
+    Tick,
+    Key { key: u8, pressed: bool },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -34,6 +37,30 @@ fn execute(state: &mut State, action: &Action) -> Result<(), String> {
             .map_err(|e| format!("{e:?}"))?,
         Action::Inspect => {}
         Action::Reset => *state = State::new(),
+        Action::Seed { seed } => state.seed_random(*seed),
+        Action::Tick => state.tick_timers(),
+        Action::Key { key, pressed } => {
+            let keys = [
+                KeyInput::Zero,
+                KeyInput::One,
+                KeyInput::Two,
+                KeyInput::Three,
+                KeyInput::Four,
+                KeyInput::Five,
+                KeyInput::Six,
+                KeyInput::Seven,
+                KeyInput::Eight,
+                KeyInput::Nine,
+                KeyInput::A,
+                KeyInput::B,
+                KeyInput::C,
+                KeyInput::D,
+                KeyInput::E,
+                KeyInput::F,
+            ];
+            let key = keys.get(usize::from(*key)).ok_or("key must be in 0..=15")?;
+            state.set_key(*key, *pressed);
+        }
     }
     Ok(())
 }

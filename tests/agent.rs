@@ -25,6 +25,29 @@ fn agent(input: &[Value]) -> (bool, Vec<Value>) {
 }
 
 #[test]
+fn keypad_timers_and_seeded_randomness_are_explicit_and_reproducible() {
+    let actions = vec![
+        json!({"action":{"type":"seed","seed":1}}),
+        json!({"action":{"type":"load","bytes":[240,10,240,21,193,255],"at":512}}),
+        json!({"action":{"type":"key","key":5,"pressed":true}}),
+        json!({"action":{"type":"step"}}),
+        json!({"action":{"type":"step"}}),
+        json!({"action":{"type":"key","key":5,"pressed":false}}),
+        json!({"action":{"type":"step"}}),
+        json!({"action":{"type":"tick"}}),
+    ];
+    let (ok, trace) = agent(&actions);
+    assert!(ok);
+    assert_eq!(trace[3]["snapshot"]["v"][0], 5);
+    assert_eq!(trace[6]["snapshot"]["delay"], 5);
+    assert_eq!(trace[7]["snapshot"]["delay"], 4);
+    assert_eq!(trace[6]["snapshot"]["v"][1], 33);
+    assert_eq!(trace[6]["snapshot"]["keypad_input"][5], false);
+    assert_eq!(trace, agent(&actions).1);
+    assert!(!agent(&[json!({"action":{"type":"key","key":16,"pressed":true}})]).0);
+}
+
+#[test]
 fn failures_stop_the_trace_and_preserve_last_successful_snapshot() {
     for bytes in [vec![0, 0], vec![31, 255]] {
         let (ok, trace) = agent(&[
