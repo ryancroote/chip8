@@ -24,6 +24,12 @@ _Avoid_: instruction pointer
 One of the sixteen CHIP-8 keys, identified by a hexadecimal value from `0` through `F`.
 _Avoid_: keyboard key
 
+**Machine snapshot**:
+A recorded representation of the complete emulator state at a point in a test trace, including architectural state and implementation state needed to reproduce execution.
+
+**Test trace**:
+An ordered record of control actions and the resulting machine snapshots, used to replay a scenario and compare selected checkpoints with reviewed expectations.
+
 ## Instructions and profile
 
 **Opcode**:

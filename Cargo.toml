@@ -2,6 +2,10 @@
 name = "chip8"
 version = "0.1.0"
 edition = "2024"
+default-run = "chip8"
 
 [dependencies]
 minifb = "0.27"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tempfile = "3.27.0"

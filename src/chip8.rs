@@ -65,6 +65,17 @@ pub struct State {
 }
 
 impl State {
+    /// Complete, read-only machine snapshot for deterministic trace inspection.
+    pub fn snapshot(&self) -> serde_json::Value {
+        serde_json::json!({
+            "pc": self.pc, "i": self.i, "v": self.v,
+            "memory": self.memory.as_slice(),
+            "display": self.display.iter().map(|row| row.as_slice()).collect::<Vec<_>>(),
+            "stack": self.stack, "delay": self.delay, "sound": self.sound,
+            "keypad_input": self.keypad_input, "random_state": self.random_state
+        })
+    }
+
     pub fn new() -> Self {
         let mut memory = [0; 4096];
         memory[FONT_STARTING_LOCATION..FONT_STARTING_LOCATION + FONT.len()].copy_from_slice(&FONT);

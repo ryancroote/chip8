@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "actions": [
+    { "action": { "type": "reset" } },
+    { "action": { "type": "seed", "seed": 1 } },
+    { "action": { "type": "load", "at": 512, "bytes": [240, 10, 240, 21, 240, 24, 193, 255] } },
+    { "action": { "type": "key", "key": 5, "pressed": true } },
+    { "action": { "type": "step" } },
+    { "action": { "type": "step" } },
+    { "action": { "type": "step" } },
+    { "action": { "type": "key", "key": 5, "pressed": false } },
+    { "action": { "type": "tick" } },
+    { "action": { "type": "step" }, "checkpoint": true }
+  ]
+}

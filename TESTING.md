@@ -2,6 +2,13 @@
 
 The tests use `State::step()` directly, so they do not open a window, read the clock, play audio, or read a physical keyboard. Timer ticks and key input are controlled explicitly. Expected instruction behavior is documented in [`docs/chip8-opcodes.md`](docs/chip8-opcodes.md); the project's terminology is in [`GLOSSARY.md`](GLOSSARY.md).
 
+## Agent testing
+
+The headless JSON protocol, complete machine snapshots, checkpoint fixtures,
+and candidate review/promotion workflow are documented in
+[`docs/agent-harness.md`](docs/agent-harness.md). Subprocess tests exercise this
+public boundary; recorded candidates are not approved expectations until human review.
+
 ## Running tests
 
 ```sh
