@@ -32,6 +32,35 @@ fn command(args: &[&str]) -> std::process::Output {
 }
 
 #[test]
+fn documented_scenario_records_promotes_and_replays() {
+    let dir = tempfile::tempdir().unwrap();
+    let candidate = dir.path().join("candidate.json");
+    let approved = dir.path().join("approved.json");
+    let candidate = candidate.to_str().unwrap();
+    let approved = approved.to_str().unwrap();
+    assert!(
+        command(&["record", "examples/agent-scenario.json", candidate])
+            .status
+            .success()
+    );
+    let fixture: Value = serde_json::from_slice(&std::fs::read(candidate).unwrap()).unwrap();
+    let snapshot = &fixture["actions"][9]["expected"];
+    assert_eq!(snapshot["v"][0], 5);
+    assert_eq!(snapshot["v"][1], 33);
+    assert_eq!(snapshot["delay"], 4);
+    assert_eq!(snapshot["sound"], 4);
+    assert_eq!(snapshot["pc"], 520);
+    assert!(command(&["review", candidate, approved]).status.success());
+    // Tests explicitly exercise promotion; this does not claim human approval.
+    assert!(
+        command(&["promote", candidate, approved, "--replace"])
+            .status
+            .success()
+    );
+    assert!(command(&["replay", approved]).status.success());
+}
+
+#[test]
 fn recording_requires_separate_candidates_and_explicit_promotion() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("source.json");
