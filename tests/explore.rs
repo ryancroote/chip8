@@ -334,3 +334,27 @@ fn a_response_that_does_not_match_the_request_stops_the_run() {
     assert_eq!(summary["failure"]["kind"], "mismatched_response");
     assert_eq!(summary["failure"]["index"], 0);
 }
+
+#[test]
+fn pacing_does_not_change_the_actions_a_seed_chooses() {
+    let dir = tempfile::tempdir().unwrap();
+    let rom = rom(dir.path());
+
+    assert!(explore(dir.path(), "fast", &rom, &[]).status.success());
+    let paced = explore(dir.path(), "paced", &rom, &["--delay-ms", "20"]);
+    assert!(
+        paced.status.success(),
+        "{}",
+        String::from_utf8_lossy(&paced.stderr)
+    );
+
+    assert_eq!(trace(dir.path(), "fast"), trace(dir.path(), "paced"));
+
+    // Watching is opt-in: a run without --view never needs a window.
+    let fast = summary(dir.path(), "fast");
+    assert_eq!(fast["viewer"], false);
+    assert_eq!(fast["delay_ms"], 0);
+    let paced = summary(dir.path(), "paced");
+    assert_eq!(paced["viewer"], false);
+    assert_eq!(paced["delay_ms"], 20);
+}

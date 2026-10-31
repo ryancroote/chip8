@@ -7,6 +7,7 @@
 //! and leaves the evidence collected so far in place.
 
 use chip8::display_image;
+use chip8::run_viewer::RunViewer;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs::File;
@@ -23,7 +24,7 @@ const PROGRAM_ORIGIN: u16 = 0x200;
 const SEED_VARIABLE: &str = "CHIP8_RUN_SEED";
 const DEFAULT_TIMEOUT_MS: u64 = 5000;
 const USAGE: &str = "usage: chip8-explore --rom ROM --seed SEED --actions N --output DIR \
-[--agent PROGRAM] [--emulator PROGRAM] [--timeout-ms MS]";
+[--agent PROGRAM] [--emulator PROGRAM] [--timeout-ms MS] [--view] [--delay-ms MS]";
 
 struct Options {
     rom: PathBuf,
@@ -33,6 +34,8 @@ struct Options {
     agent: Option<PathBuf>,
     emulator: Option<PathBuf>,
     timeout: Duration,
+    view: bool,
+    delay: Duration,
 }
 
 /// The kinds of unexpected event that end a run.
@@ -76,6 +79,8 @@ struct Report {
     completed: usize,
     last: Value,
     failure: Option<Failure>,
+    view: bool,
+    delay_ms: u64,
 }
 
 impl Report {
@@ -88,6 +93,8 @@ impl Report {
             "load": {"at": PROGRAM_ORIGIN, "bytes": self.program_len},
             "requested_actions": self.requested,
             "actions": self.completed,
+            "viewer": self.view,
+            "delay_ms": self.delay_ms,
             "last_snapshot": self.last,
         });
         if let Some(failure) = &self.failure {
@@ -114,6 +121,8 @@ fn parse(args: Vec<String>) -> Result<Options, String> {
     let mut agent = None;
     let mut emulator = None;
     let mut timeout = DEFAULT_TIMEOUT_MS;
+    let mut view = false;
+    let mut delay = 0;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
         let mut value = || args.next().ok_or(format!("{flag} needs a value\n{USAGE}"));
@@ -141,6 +150,12 @@ fn parse(args: Vec<String>) -> Result<Options, String> {
                     .parse::<u64>()
                     .map_err(|e| format!("invalid timeout: {e}"))?
             }
+            "--delay-ms" => {
+                delay = value()?
+                    .parse::<u64>()
+                    .map_err(|e| format!("invalid pacing delay: {e}"))?
+            }
+            "--view" => view = true,
             _ => return Err(format!("unknown argument {flag}\n{USAGE}")),
         }
     }
@@ -155,6 +170,8 @@ fn parse(args: Vec<String>) -> Result<Options, String> {
         agent,
         emulator,
         timeout: Duration::from_millis(timeout),
+        view,
+        delay: Duration::from_millis(delay),
     })
 }
 
@@ -297,6 +314,15 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// A short, stable name for the action, for the viewer's status area.
+fn action_name(action: &Value) -> String {
+    let kind = action["type"].as_str().unwrap_or("?");
+    match action.get("key").and_then(Value::as_u64) {
+        Some(key) => format!("{kind} {key:x}"),
+        None => kind.to_string(),
+    }
+}
+
 fn run(options: &Options) -> Result<Report, (Failure, Report)> {
     let mut report = Report {
         output: options.output.clone(),
@@ -307,6 +333,8 @@ fn run(options: &Options) -> Result<Report, (Failure, Report)> {
         completed: 0,
         last: Value::Null,
         failure: None,
+        view: options.view,
+        delay_ms: options.delay.as_millis() as u64,
     };
 
     let program = match std::fs::read(&options.rom) {
@@ -381,8 +409,23 @@ fn run(options: &Options) -> Result<Report, (Failure, Report)> {
     };
     report.last = last.clone();
 
+    let mut viewer = if options.view {
+        let title = format!("CHIP-8 run - {}", options.rom.display());
+        match RunViewer::new(10, &title) {
+            Ok(viewer) => Some(viewer),
+            Err(e) => {
+                return Err((
+                    Failure::at("emulator_error", None, format!("failed to open the viewer: {e}")),
+                    report,
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
     for index in 0..options.actions {
-        let outcome = (|| -> Result<Value, Failure> {
+        let outcome = (|| -> Result<(Value, Vec<Vec<bool>>, String), Failure> {
             agent.send(&json!({"index": index, "snapshot": last}), Some(index))?;
             let reply = agent.receive(options.timeout, Some(index))?;
             let reply: Value = serde_json::from_str(&reply).map_err(|e| {
@@ -398,7 +441,8 @@ fn run(options: &Options) -> Result<Report, (Failure, Report)> {
                 "agent reply has no action",
             ))?;
 
-            let response = emulator.request(&json!({"action": action}), options.timeout, Some(index))?;
+            let response =
+                emulator.request(&json!({"action": action}), options.timeout, Some(index))?;
             if let Some(error) = response.get("error") {
                 return Err(Failure::at(
                     "emulator_error",
@@ -427,16 +471,36 @@ fn run(options: &Options) -> Result<Report, (Failure, Report)> {
             writeln!(trace, "{entry}")
                 .and_then(|_| trace.flush())
                 .map_err(|e| {
-                    Failure::at("malformed_response", Some(index), format!("failed to write trace: {e}"))
+                    Failure::at(
+                        "malformed_response",
+                        Some(index),
+                        format!("failed to write trace: {e}"),
+                    )
                 })?;
-            Ok(response["snapshot"].clone())
+            Ok((
+                response["snapshot"].clone(),
+                display,
+                action_name(&action),
+            ))
         })();
 
         match outcome {
-            Ok(snapshot) => {
+            Ok((snapshot, display, latest)) => {
                 last = snapshot.clone();
                 report.last = snapshot;
                 report.completed += 1;
+                // Closing the window only stops watching; the run continues.
+                if let Some(open) = viewer.as_mut().filter(|viewer| viewer.is_open()) {
+                    if open
+                        .show(&display, report.completed, options.actions, &latest)
+                        .is_err()
+                    {
+                        viewer = None;
+                    }
+                }
+                if !options.delay.is_zero() {
+                    std::thread::sleep(options.delay);
+                }
             }
             Err(failure) => {
                 report.failure = Some(failure.clone());

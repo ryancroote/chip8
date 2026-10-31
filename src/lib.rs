@@ -6,3 +6,4 @@
 pub mod chip8;
 pub mod display_image;
 pub mod renderer;
+pub mod run_viewer;
