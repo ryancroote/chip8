@@ -3,7 +3,8 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 fn agent(input: &[Value]) -> (bool, Vec<Value>) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_chip8-agent"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_chip8"))
+        .arg("agent")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -25,7 +26,8 @@ fn agent(input: &[Value]) -> (bool, Vec<Value>) {
 }
 
 fn command(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_chip8-agent"))
+    Command::new(env!("CARGO_BIN_EXE_chip8"))
+        .arg("agent")
         .args(args)
         .output()
         .unwrap()
@@ -34,7 +36,8 @@ fn command(args: &[&str]) -> std::process::Output {
 #[test]
 fn agent_responds_before_eof_and_rejects_malformed_requests() {
     use std::io::BufRead;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_chip8-agent"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_chip8"))
+        .arg("agent")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

@@ -1,5 +1,7 @@
 # Exploratory runs mediate two child processes over JSON
 
+_Status: superseded by [ADR-0002](0002-unified-emulator-and-visual-rpc.md)_
+
 Exploratory runs exercise the emulator through the same line-delimited JSON
 protocol that `chip8-agent` already exposes to fixture replay, rather than
 linking the emulator and the agent into one process. A harness process owns the

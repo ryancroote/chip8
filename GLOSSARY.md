@@ -30,23 +30,15 @@ A recorded representation of the complete emulator state at a point in a test tr
 **Test trace**:
 An ordered record of control actions and the resulting machine snapshots, used to replay a scenario and compare selected checkpoints with reviewed expectations.
 
-## Agent testing
-
-**Exploratory run**:
-A bounded, seeded interaction session in which an agent chooses actions against one fixed program, used to surface unexpected behavior rather than to prove correctness.
-_Avoid_: fuzz test
+## External control
 
 **Agent**:
 A separate process that receives a machine snapshot and chooses the next action.
 _Avoid_: bot, player
 
-**Live viewer**:
-An optional window that displays the emulator's display from run observations while the run proceeds.
-_Avoid_: emulator window (when referring to the harness display)
-
-**Run artifact**:
-A recorded output of an exploratory run, such as the action trace, display images, and summary.
-_Avoid_: log
+**Game controller**:
+A separate process that receives images of the CHIP-8 display and chooses keypad inputs for the running game.
+_Avoid_: Agent (when referring to visual game control)
 
 ## Instructions and profile
 

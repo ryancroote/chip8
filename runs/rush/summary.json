@@ -1,0 +1,14 @@
+{
+  "actions": 200,
+  "delay_ms": 0,
+  "load": {
+    "at": 512,
+    "bytes": 3582
+  },
+  "requested_actions": 200,
+  "rom_sha256": "3cd9d58c25a11c232c89cf42ccd335da059f497e426f34d9f9054b8c893ffd94",
+  "seed": 7,
+  "status": "success",
+  "version": 1,
+  "viewer": true
+}

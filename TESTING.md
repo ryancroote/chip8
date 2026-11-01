@@ -2,15 +2,12 @@
 
 The tests use `State::step()` directly, so they do not open a window, read the clock, play audio, or read a physical keyboard. Timer ticks and key input are controlled explicitly. Expected instruction behavior is documented in [`docs/chip8-opcodes.md`](docs/chip8-opcodes.md); the project's terminology is in [`GLOSSARY.md`](GLOSSARY.md).
 
-## Agent testing
+## Control interfaces
 
-The headless JSON protocol, complete machine snapshots, checkpoint fixtures,
-and candidate review/promotion workflow are documented in
-[`docs/agent-harness.md`](docs/agent-harness.md). Subprocess tests exercise this
-public boundary; recorded candidates are not approved expectations until human review.
-Exploratory runs, which drive a ROM through an autonomous agent process and keep a
-trace plus per-action display images, are covered by `tests/explore.rs` and documented
-in the same file.
+The WebSocket visual-controller RPC and the snapshot-based JSON-lines interface,
+including checkpoints and fixture review/promotion, are documented in
+[`docs/agent-harness.md`](docs/agent-harness.md). `tests/rpc.rs`, `tests/cli.rs`,
+and `tests/agent.rs` exercise these public process boundaries.
 
 ## Running tests
 
