@@ -1,0 +1,73 @@
+OBJECTIVE
+=========
+Solve one Rush Hour puzzle by sliding its arrow block(s) out of the 6x6 grid.
+Entering a puzzle is only preparation, NOT completion. If a puzzle is already
+visible, continue playing it rather than reopening menus or restarting.
+
+The playfield is on the left of the image. The board number and move counter
+are on the right; they are not part of the 6x6 grid.
+
+CONTROLS: CHIP-8 HEXADECIMAL KEYS
+================================
+ Hex key   PC key   Use
+ ----------------------
+ 5         W        up
+ 8         S        down
+ 7         A        left
+ 9         D        right
+ A         Z        confirm / hold while sliding a block
+ 1         1        in-game options / back
+
+Use the HEX key values, not the PC labels. Hexadecimal A is confirm/slide;
+hexadecimal 7 is left. They are different keys.
+
+PLAYING A PUZZLE
+================
+Direction keys WITHOUT A move the round selection cursor across the grid.
+To slide the block under the cursor, hold A AND the desired direction in
+THE SAME action:
+  [A, 5] = slide up;    [A, 8] = slide down;
+  [A, 7] = slide left;  [A, 9] = slide right.
+Blocks slide along their own orientation and cannot pass through other blocks.
+A by itself does not slide a block. Do not press opposite directions together.
+Do not use key 1 while a playable board is visible unless you deliberately
+need the options menu; it is not a movement key.
+
+Before choosing a move, identify the arrow block(s), their exit direction,
+and the blocks obstructing their path. Work backward from the exit: move
+obstructing blocks into available spaces so the arrow block can leave.
+Navigate the cursor to the block you intend to move, then use an A+direction
+chord to slide it. Moving a non-arrow block to clear space can be necessary.
+
+Start with 8-frame actions for cursor navigation and block slides, then inspect
+the result. Use a longer allowed duration if the input did not register. Compare
+the cursor, block positions, and move counter with the previous image to tell
+cursor navigation from an actual block move. If a slide is blocked, choose a
+different direction or reposition another block instead of repeating it.
+
+A static puzzle is waiting for YOUR INPUT. No-key actions will not solve it.
+When several moves seem plausible, choose a purposeful legal move and inspect
+the result rather than waiting indefinitely. Reconsider unsuccessful moves
+using the recent display/action history.
+
+MENUS AND TIMING
+================
+The emulator is paused while you decide. Each action frame advances only
+1/60 second, regardless of how much real time passes. The controller releases
+all keys after each action and normally advances additional released-key
+settling frames before presenting the next image. You do not need a separate
+no-key action merely to release a key.
+
+If still at the Play menu, press A for 60 frames. If at board-set selection,
+confirm the initial board set with A for 60 frames. Once the puzzle appears,
+switch to playing it; do not keep pressing A alone as if still in a menu.
+Wait with no keys only when startup, a transition, or an animation actually
+needs more emulated time. Do not wait simply because a finished board image
+is unchanged.
+
+COMPLETION
+==========
+Do not assess the goal as complete merely because a menu was confirmed, a
+puzzle appeared, the cursor moved, or the move counter increased. Require clear
+visual evidence that the arrow block(s) escaped and the board was solved,
+such as a victory indication or advancement to the next board after an exit.
