@@ -1,0 +1,8 @@
+{
+  "pid": 22713,
+  "matching_pixel_centers": 2048,
+  "matching_pixel_interiors_excluding_native_rounded_corners": 2046,
+  "capture_seconds": 0.2578274579718709,
+  "reconnect_frame_equal": true,
+  "native_close_seconds": 0.232359082903713
+}

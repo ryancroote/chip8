@@ -43,20 +43,30 @@ application. No Accessibility permission bypass or screen-unlock attempt was mad
 | Native close button, idle connected controller | Process gone 0.307 s after click; launcher exited successfully |
 | Native close button, during 60-frame action | Process gone 0.773 s after click; launcher exited successfully |
 | Native close button, disconnected controller | Process gone 0.222 s after click; launcher exited successfully |
+| Rush Hour: first board, slide, native frame comparison | All 2,048 pixel centers matched; 2,046 full pixel interiors matched excluding the two native rounded bottom corner cells; capture 0.258 s after reply |
+| Rush Hour: controller handoff | Reconnected controller received an identical frame, preserving the board and move counter |
+| Rush Hour: native close after disconnect | Process gone 0.232 s after click; launcher exited successfully |
 
 All close cases were bounded by five-second deadlines and checked the emulator
 process itself, not just whether the controller disconnected. No panic was
 reported. Machine-readable measurements are checked in beside this note.
 
-## Remaining check
+## Rush Hour completion
 
-A final Rush Hour-specific graphical session entered its first board and accepted
-a slide, but the desktop locked before its native screenshot/reconnect/close
-sequence finished. Window capture failed with `could not create image from
-window`, and the foreground process was `loginwindow`. Do not count that sequence
-as a passed end-to-end Rush Hour check.
+The first attempt was interrupted by desktop lock and was not counted as a pass.
+After the user unlocked the Mac, a fresh graphical Rush Hour test instance
+entered its first board, accepted a slide, matched the native window to its RPC
+frame, preserved that exact frame across controller handoff, and exited through
+the native close button. No headless fallback was used. The user's existing
+Rush Hour instance on port 8791 was left untouched.
 
-Unlock the desktop and repeat checklist step 6, including native capture,
-controller handoff, and native window close. The generic deterministic native
-checks above passed before the desktop locked. PR #36 remains draft pending the
-last Rush Hour check; no further production-code change has been identified.
+The initial full-interior Rush Hour comparison detected macOS's rounded window
+mask in the bottom-left corner cell, where the game draws white. The final
+comparison checked all 2,048 pixel centers, plus the full interiors of the 2,046
+non-corner cells. Only the native rounded bottom corner cells were excluded from
+full-interior checks, not from pixel-center checks. This accounts for native
+window chrome rather than accepting a game-pixel mismatch.
+
+All pending desktop verification is complete. No additional production-code
+change was necessary. Machine-readable Rush Hour measurements are in
+`graphical-rpc-rushhour-results.json` beside this note.
