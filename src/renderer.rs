@@ -10,6 +10,7 @@
 use minifb::{ScaleMode, Window, WindowOptions};
 
 use crate::chip8::State;
+use crate::input::update_keypad_input;
 
 const DISPLAY_WIDTH: usize = 64;
 const DISPLAY_HEIGHT: usize = 32;
@@ -48,6 +49,20 @@ impl Renderer {
             width: DISPLAY_WIDTH,
             height: DISPLAY_HEIGHT,
         })
+    }
+
+    /// Update the CHIP-8 keypad from the host keyboard. Inputs are cleared
+    /// when the window is inactive, preventing stuck keys after focus changes.
+    pub fn update_keypad_input(&mut self, state: &mut State) {
+        // minifb 0.27 reports the macOS active flag inverted relative to its
+        // native boolean; account for that so focused input is not discarded.
+        #[cfg(target_os = "macos")]
+        let focused = !self.window.is_active();
+        #[cfg(not(target_os = "macos"))]
+        let focused = self.window.is_active();
+
+        let keys = self.window.get_keys();
+        update_keypad_input(state, focused, &keys);
     }
 
     /// Push the current framebuffer to the window. The window remains visible

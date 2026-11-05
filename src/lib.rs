@@ -5,5 +5,6 @@
 
 pub mod agent;
 pub mod chip8;
+pub mod input;
 pub mod renderer;
 pub mod rpc;
