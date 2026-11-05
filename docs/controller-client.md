@@ -122,6 +122,39 @@ do not extend it. The allowance must be positive and large enough for transport,
 image encoding, and server scheduling overhead; very small allowances can expire
 even for a normally functioning emulator. All I/O stays synchronous and bounded.
 
+## Explicit released-key settling
+
+`Session::action_with_settling(keys, primary_frames, settling_frames)` adds an
+explicit optional second stage. Primary duration is `1..=60`; settling is
+`0..=60`. `action(keys, frames)` defaults to **zero settling**, as does the
+example when its final argument is omitted. All keys and both durations are
+validated before the first request; invalid settling sends no primary move.
+
+```sh
+# Hold A+F for 6 frames, then run 12 frames with all keys released:
+cargo run --example observe -- ws://127.0.0.1:PRINTED_PORT initial.png settled.png a,f 6 12
+```
+
+Nonzero settling sends exactly one empty-key action **after** primary success,
+with its own correlated response and duration-aware deadline. Success returns
+only the final settled observation. Zero settling sends only the primary action.
+The stages are never merged into a longer held-key action. No settling follows
+primary rejection, protocol failure, disconnection, or uncertain execution.
+For longer waits, issue additional explicit `session.action(&[], frames)` calls,
+each bounded to 60 frames. Nothing advances automatically while inspecting images.
+
+If the primary succeeds but settling fails, the call returns
+`Error::SettlingFailed { primary, primary_frames, settling_frames,
+outcome_unknown, source }`. `primary` is the completed primary's confirmed
+observation, **not a successful settled result**. `source` is the structured
+settling error; `outcome_unknown` identifies uncertain settling (also wrapped as
+`UnknownOutcome`), which invalidates the session. A matching RPC rejection has
+`outcome_unknown: false`, but can still mean partial execution. No rollback is
+implied. Never repeat the primary move to recover from a settling failure, and
+never assume the retained primary image describes the game's current state.
+The example reports this error instead of saving an earlier frame as success.
+Saving the final confirmed image remains a separate filesystem operation.
+
 ## Failures and ambiguity
 
 - `Error::InvalidAction` means nothing was transmitted or advanced by that call.
@@ -145,7 +178,7 @@ even for a normally functioning emulator. All I/O stays synchronous and bounded.
   successful action's image fails, the move is still confirmed. Retry the file
   write if appropriate, never the move. A cloned observation can retain its image.
 
-Settling and an explicit reconnect method belong to follow-up tickets. For now,
+An explicit reconnect method belongs to a follow-up ticket. For now,
 an uncertain session cannot perform further actions; callers can release it and
 explicitly create a new `Session::connect` to observe the endpoint anew. No game
 restart or endpoint fallback occurs. The protocol cannot prove the endpoint is

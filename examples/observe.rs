@@ -3,12 +3,12 @@ use chip8::controller::{Session, Timeouts};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 3 && args.len() != 6 {
-        return Err("usage: cargo run --example observe -- ENDPOINT initial.png [result.png HEX_KEYS|- FRAMES]".into());
+    if args.len() != 3 && args.len() != 6 && args.len() != 7 {
+        return Err("usage: cargo run --example observe -- ENDPOINT initial.png [result.png HEX_KEYS|- PRIMARY_FRAMES [SETTLING_FRAMES]]".into());
     }
     // This example accepts comma-separated hexadecimal keypad values, not
     // host keyboard labels. The library itself accepts only numeric values.
-    let action = if args.len() == 6 {
+    let action = if args.len() >= 6 {
         let keys = if args[4] == "-" {
             Vec::new()
         } else {
@@ -17,7 +17,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|key| u8::from_str_radix(key, 16))
                 .collect::<Result<Vec<_>, _>>()?
         };
-        Some((keys, args[5].parse::<u32>()?))
+        let settling = args
+            .get(6)
+            .map(|s| s.parse::<u32>())
+            .transpose()?
+            .unwrap_or(0);
+        Some((keys, args[5].parse::<u32>()?, settling))
     } else {
         None
     };
@@ -26,8 +31,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let frame = session.observation();
         println!("{}x{} {}", frame.width(), frame.height(), frame.format());
         frame.save_png(&args[2])?;
-        if let Some((keys, frames)) = action {
-            let confirmed = session.action(&keys, frames)?;
+        if let Some((keys, frames, settling)) = action {
+            println!("primary: {frames} frames; released-key settling: {settling} frames");
+            let confirmed = session.action_with_settling(&keys, frames, settling)?;
             // A save failure is a filesystem error after a confirmed action.
             // Do not retry the action to repair an image-output failure.
             confirmed.save_png(&args[3])?;

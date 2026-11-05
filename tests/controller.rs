@@ -168,6 +168,225 @@ fn invalid_actions_are_local_and_valid_chords_have_distinct_response_ids() {
 }
 
 #[test]
+fn explicit_settling_is_prevalidated_and_ordered_after_confirmed_primary() {
+    let (notification, _) = initial();
+    let peer = Peer::start(move |mut socket| {
+        send(&mut socket, notification.clone());
+        for (keys, frames) in [(json!([10, 15]), 60), (json!([]), 60), (json!([1]), 1)] {
+            let Message::Text(text) = socket.read().unwrap() else {
+                panic!("action")
+            };
+            let request: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(request["params"], json!({"keys":keys,"frames":frames}));
+            // No following stage may arrive before this acknowledgement.
+            socket
+                .get_mut()
+                .set_read_timeout(Some(Duration::from_millis(20)))
+                .unwrap();
+            assert!(socket.read().is_err());
+            socket
+                .get_mut()
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            send(
+                &mut socket,
+                json!({"jsonrpc":"2.0","id":request["id"],"result":notification["params"]}),
+            );
+        }
+        assert!(matches!(socket.read().unwrap(), Message::Close(_)));
+        let _ = socket.flush();
+    });
+    let mut session = Session::connect(&peer.endpoint, Timeouts::default()).unwrap();
+    for (keys, frames, settling) in [
+        (vec![16], 1, 1),
+        (vec![1, 1], 1, 1),
+        (vec![], 0, 1),
+        (vec![], 61, 1),
+        (vec![1], 1, 61),
+        (vec![1], 1, u32::MAX),
+    ] {
+        assert!(matches!(
+            session.action_with_settling(&keys, frames, settling),
+            Err(Error::InvalidAction(_))
+        ));
+    }
+    session.action_with_settling(&[10, 15], 60, 60).unwrap();
+    session.action_with_settling(&[1], 1, 0).unwrap();
+    session.disconnect().unwrap();
+}
+
+#[test]
+fn primary_failure_never_sends_settling() {
+    for mode in ["rejection", "disconnect", "protocol", "deadline"] {
+        let (notification, _) = initial();
+        let peer = Peer::start(move |mut socket| {
+            send(&mut socket, notification.clone());
+            assert!(matches!(socket.read().unwrap(), Message::Text(_)));
+            match mode {
+                "rejection" => send(
+                    &mut socket,
+                    json!({"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"primary fault"}}),
+                ),
+                "protocol" => send(
+                    &mut socket,
+                    json!({"jsonrpc":"2.0","id":999,"result":notification["params"]}),
+                ),
+                "disconnect" => return,
+                _ => {}
+            }
+            assert!(
+                !matches!(socket.read(), Ok(Message::Text(_))),
+                "settling after failed primary"
+            );
+        });
+        let mut session = Session::connect(&peer.endpoint, short_timeouts()).unwrap();
+        let before = session.observation().clone();
+        let error = session.action_with_settling(&[10], 1, 1).unwrap_err();
+        if mode == "rejection" {
+            assert!(matches!(error, Error::Rpc { code: -1, .. }));
+        } else {
+            assert!(matches!(error, Error::UnknownOutcome { .. }));
+        }
+        assert_eq!(session.observation(), &before);
+        drop(session);
+    }
+}
+
+#[test]
+fn settling_has_its_own_duration_aware_deadline_and_returns_final_image() {
+    let (notification, primary_bytes) = initial();
+    let mut final_bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut final_bytes, 64, 32);
+        encoder.set_color(png::ColorType::Grayscale);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&[0; 2048])
+            .unwrap();
+    }
+    let expected = final_bytes.clone();
+    let peer = Peer::start(move |mut socket| {
+        send(&mut socket, notification.clone());
+        for stage in 1..=2 {
+            let Message::Text(text) = socket.read().unwrap() else {
+                panic!("action")
+            };
+            let request: Value = serde_json::from_str(&text).unwrap();
+            let mut frame = notification["params"].clone();
+            if stage == 2 {
+                // Exceeds transport allowance, but not settling's 60-frame budget.
+                std::thread::sleep(Duration::from_millis(200));
+                frame["data"] =
+                    json!(base64::engine::general_purpose::STANDARD.encode(&final_bytes));
+            }
+            send(
+                &mut socket,
+                json!({"jsonrpc":"2.0","id":request["id"],"result":frame}),
+            );
+        }
+    });
+    let mut session = Session::connect(&peer.endpoint, short_timeouts()).unwrap();
+    let final_frame = session.action_with_settling(&[10], 1, 60).unwrap();
+    assert_eq!(final_frame.png_bytes(), expected);
+    assert_ne!(final_frame.png_bytes(), primary_bytes);
+}
+
+#[test]
+fn settling_failure_preserves_completed_primary_without_replaying_it() {
+    for mode in ["rejection", "disconnect", "deadline", "wrong-id"] {
+        let (notification, bytes) = initial();
+        let mut blank = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut blank, 64, 32);
+            encoder.set_color(png::ColorType::Grayscale);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&[0; 2048])
+                .unwrap();
+        }
+        let mut initial_notification = notification.clone();
+        initial_notification["params"]["data"] =
+            json!(base64::engine::general_purpose::STANDARD.encode(&blank));
+        let peer = Peer::start(move |mut socket| {
+            send(&mut socket, initial_notification);
+            let Message::Text(primary) = socket.read().unwrap() else {
+                panic!("primary")
+            };
+            let primary: Value = serde_json::from_str(&primary).unwrap();
+            assert_eq!(primary["params"], json!({"keys":[10],"frames":1}));
+            send(
+                &mut socket,
+                json!({"jsonrpc":"2.0","id":primary["id"],"result":notification["params"]}),
+            );
+            let Message::Text(settling) = socket.read().unwrap() else {
+                panic!("settling")
+            };
+            let settling: Value = serde_json::from_str(&settling).unwrap();
+            assert_eq!(settling["params"], json!({"keys":[],"frames":60}));
+            assert_ne!(primary["id"], settling["id"]);
+            match mode {
+                "rejection" => send(
+                    &mut socket,
+                    json!({"jsonrpc":"2.0","id":settling["id"],"error":{"code":-32000,"message":"settling fault"}}),
+                ),
+                "wrong-id" => send(
+                    &mut socket,
+                    json!({"jsonrpc":"2.0","id":primary["id"],"result":notification["params"]}),
+                ),
+                "deadline" => { /* wait for the caller to close its uncertain transport */ }
+                _ => return,
+            }
+            assert!(
+                !matches!(socket.read(), Ok(Message::Text(_))),
+                "unexpected retry"
+            );
+        });
+        let mut session = Session::connect(&peer.endpoint, short_timeouts()).unwrap();
+        assert_ne!(session.observation().png_bytes(), bytes);
+        let error = session.action_with_settling(&[10], 1, 60).unwrap_err();
+        let Error::SettlingFailed {
+            primary,
+            primary_frames,
+            settling_frames,
+            outcome_unknown,
+            source,
+        } = error
+        else {
+            panic!("{mode}: {error}")
+        };
+        assert_eq!(primary.png_bytes(), bytes);
+        assert_eq!((primary_frames, settling_frames), (1, 60));
+        assert_eq!(outcome_unknown, mode != "rejection");
+        match mode {
+            "rejection" => assert!(
+                matches!(*source, Error::Rpc { code: -32000, ref message } if message == "settling fault")
+            ),
+            "deadline" => assert!(
+                matches!(*source, Error::UnknownOutcome { source } if matches!(*source, Error::Deadline { stage: Stage::Action }))
+            ),
+            "wrong-id" => assert!(
+                matches!(*source, Error::UnknownOutcome { source } if matches!(*source, Error::InvalidProtocol { stage: Stage::Action, .. }))
+            ),
+            _ => assert!(
+                matches!(*source, Error::UnknownOutcome { source } if matches!(*source, Error::Disconnected { stage: Stage::Action }))
+            ),
+        }
+        assert_eq!(session.observation().png_bytes(), bytes);
+        if mode != "rejection" {
+            assert!(matches!(
+                session.action(&[], 1),
+                Err(Error::SessionInvalidated)
+            ));
+        }
+        drop(session);
+    }
+}
+
+#[test]
 fn received_action_without_acknowledgement_is_unknown_and_never_replayed() {
     for delayed in [false, true] {
         let (notification, _) = initial();
