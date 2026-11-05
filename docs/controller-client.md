@@ -1,4 +1,4 @@
-# Read-only visual controller client
+# Visual controller client
 
 The library's `chip8::controller::Session` attaches to an **already running**
 emulator through visual RPC (ADR-0002). It never discovers, launches, loads,
@@ -13,8 +13,17 @@ cargo run -- path/to/game.ch8 --headless --rpc --port 0
 cargo run --example observe -- ws://127.0.0.1:PRINTED_PORT display.png
 ```
 
-The example attaches, saves the initial display, and disconnects. No action is
-sent: connection, thinking time, reading `observation()`, and saving all advance
+The command above attaches, saves the initial display, and disconnects without
+sending an action. To execute a caller-chosen action and save its result:
+
+```sh
+# Hold hexadecimal keypad A and F simultaneously for 6 frames:
+cargo run --example observe -- ws://127.0.0.1:PRINTED_PORT initial.png result.png a,f 6
+# Explicitly execute 60 frames with no keys:
+cargo run --example observe -- ws://127.0.0.1:PRINTED_PORT initial.png result.png - 60
+```
+
+Connection, thinking time, reading `observation()`, and saving all advance
 **zero emulated frames**. Disconnecting releases only the controller connection;
 the running game stays paused and another controller may attach. Dropping a
 session releases its TCP socket without a graceful WebSocket handshake.
@@ -23,13 +32,15 @@ session releases its TCP socket without a graceful WebSocket handshake.
 use chip8::controller::{Session, Timeouts};
 use std::time::Duration;
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
-let session = Session::connect("ws://127.0.0.1:9000", Timeouts {
+let mut session = Session::connect("ws://127.0.0.1:9000", Timeouts {
     observation: Duration::from_secs(2),
     ..Timeouts::default()
 })?;
 let frame = session.observation();
 assert_eq!((frame.width(), frame.height(), frame.format()), (64, 32, "png"));
 frame.save_png("initial.png")?;
+let result = session.action(&[0xa, 0xf], 6)?;
+result.save_png("result.png")?; // independent filesystem error, not action failure
 session.disconnect()?;
 # Ok(()) }
 ```
@@ -86,6 +97,57 @@ screen capture, or desktop automation is required. On macOS machines whose defau
 SDK is newer than the installed linker, prefix Cargo commands with
 `SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk`.
 
-This slice is read-only; action, settling, and explicit reconnect workflows are
-follow-up work. A new `Session::connect` always observes the supplied endpoint
-anew; the protocol cannot prove it is still owned by the same emulator process.
+## Keypad actions and timing
+
+`Session::action(&[u8], frames: u32) -> Result<&Observation, Error>` executes one
+synchronous request. The mutable session permits at most one in-flight action.
+Keys must be unique numeric CHIP-8 keypad values `0..=15` (hexadecimal `0..=F`):
+`0xa` is numeric 10, not a host keyboard label. Keys are held **simultaneously**;
+`&[]` explicitly runs with no keys. Durations must be `1..=60` frames. Invalid
+keys, duplicates, or durations return `Error::InvalidAction` before any request
+is sent. Nothing is clamped, deduplicated, split, or converted into host input.
+
+The server owns key release at the end of the action, 60-Hz pacing, and instruction
+execution. There are no startup/menu inputs, synthetic release messages, polling
+actions, automatic waits, or hidden extra frames. A completed action replaces
+`observation()` with its validated resulting image. Equal image bytes can be a
+valid result: freshness is established by the matching request ID, not by a pixel
+change. Unsolicited notifications never confirm an action or replace its image.
+
+`Timeouts::action_transport` defaults to **3 seconds** and is configurable at
+connection time. Each action gets one total deadline of **frames / 60 seconds +
+transport allowance**, beginning before transmission and bounding both writes and
+the entire response wait. Partial messages, notifications, and ping/pong traffic
+do not extend it. The allowance must be positive and large enough for transport,
+image encoding, and server scheduling overhead; very small allowances can expire
+even for a normally functioning emulator. All I/O stays synchronous and bounded.
+
+## Failures and ambiguity
+
+- `Error::InvalidAction` means nothing was transmitted or advanced by that call.
+- `Error::Rpc { code, message }` preserves a matching JSON-RPC rejection. It is
+  **not success**, nor a promise of unchanged machine state: an execution fault
+  can occur after partial progress. The connection remains usable. Its previous
+  confirmed image is historical, not evidence that a rejected action did nothing.
+- Once transmission starts, a deadline, disconnection, malformed frame/envelope,
+  or mismatched response ID becomes `Error::UnknownOutcome { source }`. The
+  source distinguishes `Deadline`, `Disconnected`, and `InvalidProtocol` at
+  `Stage::Action`. The action **may already have executed**. No action is ever
+  automatically resent, reconnected, or replayed.
+- An unknown outcome immediately releases the transport and invalidates the
+  session. Later `action` calls return `Error::SessionInvalidated` locally.
+  `observation()` still exposes the last confirmed image for diagnosis, **not a
+  current observation of the uncertain game**. Drop the session or consume it
+  with `disconnect`; graceful disconnect may fail on its closed transport.
+- Request IDs are distinct within a connection. The theoretical counter-exhaustion
+  case returns `Error::RequestIdsExhausted` locally instead of reusing an ID.
+- `Observation::save_png` returns an independent `std::io::Result`. If saving a
+  successful action's image fails, the move is still confirmed. Retry the file
+  write if appropriate, never the move. A cloned observation can retain its image.
+
+Settling and an explicit reconnect method belong to follow-up tickets. For now,
+an uncertain session cannot perform further actions; callers can release it and
+explicitly create a new `Session::connect` to observe the endpoint anew. No game
+restart or endpoint fallback occurs. The protocol cannot prove the endpoint is
+still owned by the same emulator process. ROM controls, planning, and success
+detection remain entirely outside the client.

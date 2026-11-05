@@ -23,6 +23,8 @@ pub struct Timeouts {
     pub handshake: Duration,
     pub observation: Duration,
     pub disconnect: Duration,
+    /// Added to requested frames / 60 seconds; bounds the entire action I/O.
+    pub action_transport: Duration,
 }
 
 impl Default for Timeouts {
@@ -32,6 +34,7 @@ impl Default for Timeouts {
             handshake: Duration::from_secs(3),
             observation: Duration::from_secs(3),
             disconnect: Duration::from_secs(3),
+            action_transport: Duration::from_secs(3),
         }
     }
 }
@@ -41,18 +44,43 @@ pub enum Stage {
     Connect,
     Handshake,
     InitialObservation,
+    Action,
     Disconnect,
 }
 
-/// Transport/initialization failures are separate from image-save I/O errors.
+/// Local, RPC, and transport failures, separate from image-save I/O errors.
+/// An unknown action outcome wraps its structured transport/protocol cause.
 #[derive(Debug)]
 pub enum Error {
     InvalidEndpoint(String),
     InvalidTimeout,
-    Connection { stage: Stage, message: String },
-    InvalidProtocol { stage: Stage, message: String },
-    Disconnected { stage: Stage },
-    Deadline { stage: Stage },
+    InvalidAction(String),
+    RequestIdsExhausted,
+    Connection {
+        stage: Stage,
+        message: String,
+    },
+    InvalidProtocol {
+        stage: Stage,
+        message: String,
+    },
+    Disconnected {
+        stage: Stage,
+    },
+    Deadline {
+        stage: Stage,
+    },
+    /// A matching server rejection; execution may have partially occurred.
+    Rpc {
+        code: i64,
+        message: String,
+    },
+    /// Transmission began, but no valid acknowledgement was confirmed.
+    /// The session's last observation is preserved and further actions refused.
+    UnknownOutcome {
+        source: Box<Error>,
+    },
+    SessionInvalidated,
 }
 
 impl std::fmt::Display for Error {
@@ -60,7 +88,14 @@ impl std::fmt::Display for Error {
         write!(f, "{self:?}")
     }
 }
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::UnknownOutcome { source } => Some(source.as_ref()),
+            _ => None,
+        }
+    }
+}
 
 /// A fully decoded and validated native 64-by-32, 8-bit grayscale PNG.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,6 +128,8 @@ pub struct Session {
     socket: WebSocket<DeadlineStream>,
     observation: Observation,
     timeouts: Timeouts,
+    next_id: u64,
+    invalidated: bool,
 }
 
 impl Session {
@@ -104,6 +141,11 @@ impl Session {
             timeouts.handshake,
             timeouts.observation,
             timeouts.disconnect,
+            timeouts.action_transport,
+            timeouts
+                .action_transport
+                .checked_add(Duration::from_secs(1))
+                .ok_or(Error::InvalidTimeout)?,
         ] {
             if duration.is_zero() || Instant::now().checked_add(duration).is_none() {
                 return Err(Error::InvalidTimeout);
@@ -152,11 +194,105 @@ impl Session {
             socket,
             observation,
             timeouts,
+            next_id: 1,
+            invalidated: false,
         })
     }
 
+    /// Last confirmed image; after a rejection or unknown outcome this may no
+    /// longer describe the current game. Reading it never advances emulated time.
     pub fn observation(&self) -> &Observation {
         &self.observation
+    }
+
+    /// Execute one simultaneous keypad action and confirm its resulting image.
+    /// Keys must be unique numeric values 0..=15; empty is valid. Frames must be
+    /// 1..=60. Invalid inputs fail locally, without transmission or advancement.
+    /// The total I/O deadline is frames / 60 seconds plus `action_transport`.
+    /// No request is retried, and no extra frames are executed. An uncertain
+    /// failure returns `UnknownOutcome`, preserving the last confirmed image
+    /// and invalidating this session for all subsequent actions. A matching
+    /// `Rpc` rejection is not success or a guarantee of unchanged machine state.
+    pub fn action(&mut self, keys: &[u8], frames: u32) -> Result<&Observation, Error> {
+        if self.invalidated {
+            return Err(Error::SessionInvalidated);
+        }
+        if !(1..=60).contains(&frames) {
+            return Err(Error::InvalidAction("frames must be in 1..=60".into()));
+        }
+        let mut seen = [false; 16];
+        for &key in keys {
+            let Some(pressed) = seen.get_mut(usize::from(key)) else {
+                return Err(Error::InvalidAction("keys must be in 0..=15".into()));
+            };
+            if *pressed {
+                return Err(Error::InvalidAction(
+                    "duplicate keys are not allowed".into(),
+                ));
+            }
+            *pressed = true;
+        }
+        let id = self.next_id;
+        self.next_id = id.checked_add(1).ok_or(Error::RequestIdsExhausted)?;
+        self.socket.get_mut().deadline = Instant::now()
+            + self.timeouts.action_transport
+            + Duration::from_secs_f64(f64::from(frames) / 60.0);
+        match self.execute_action(keys, frames, id) {
+            Ok(observation) => {
+                self.observation = observation;
+                Ok(&self.observation)
+            }
+            Err(error @ Error::Rpc { .. }) => Err(error),
+            Err(source) => {
+                self.invalidated = true;
+                // Release ownership promptly; retaining the confirmed image is
+                // useful, but this transport must never send another action.
+                let _ = self
+                    .socket
+                    .get_ref()
+                    .stream
+                    .shutdown(std::net::Shutdown::Both);
+                Err(Error::UnknownOutcome {
+                    source: Box::new(source),
+                })
+            }
+        }
+    }
+
+    fn execute_action(&mut self, keys: &[u8], frames: u32, id: u64) -> Result<Observation, Error> {
+        let request = serde_json::json!({"jsonrpc":"2.0", "id":id,
+            "method":"chip8.action", "params":{"keys":keys,"frames":frames}});
+        match self.socket.send(Message::Text(request.to_string().into())) {
+            Ok(()) => {}
+            // send() has queued this message. Only flush the same buffered
+            // bytes on backpressure; invoking send() again could duplicate it.
+            Err(tungstenite::Error::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => loop {
+                match self.socket.flush() {
+                    Err(tungstenite::Error::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => {
+                        pause()
+                    }
+                    result => break result.map_err(|e| transport_error(Stage::Action, e))?,
+                }
+            },
+            Err(e) => return Err(transport_error(Stage::Action, e)),
+        }
+        let observation = loop {
+            match read_message(&mut self.socket, Stage::Action)? {
+                Message::Text(text) => {
+                    if let Some(observation) = parse_response(text.as_str(), id)? {
+                        break observation;
+                    }
+                }
+                Message::Ping(_) | Message::Pong(_) => {}
+                Message::Close(_) => {
+                    return Err(Error::Disconnected {
+                        stage: Stage::Action,
+                    });
+                }
+                _ => return Err(action_invalid("expected JSON-RPC text response")),
+            }
+        };
+        Ok(observation)
     }
 
     /// Complete a bounded close handshake and release only this connection.
@@ -241,7 +377,10 @@ fn parse_initial(text: &str) -> Result<Observation, Error> {
     {
         return Err(invalid("invalid initial notification envelope"));
     }
-    let frame = initial.params;
+    validate_frame(initial.params)
+}
+
+fn validate_frame(frame: Frame) -> Result<Observation, Error> {
     if frame.width != 64 || frame.height != 32 || frame.format != "png" {
         return Err(invalid("only 64-by-32 PNG frames are supported"));
     }
@@ -273,6 +412,85 @@ fn parse_initial(text: &str) -> Result<Observation, Error> {
     reader.finish().map_err(invalid)?;
     drop(reader);
     Ok(Observation { png })
+}
+
+fn action_invalid(message: impl ToString) -> Error {
+    Error::InvalidProtocol {
+        stage: Stage::Action,
+        message: message.to_string(),
+    }
+}
+
+// Explicit null is not absence. Typed fields also reject duplicate envelope,
+// rejection, and frame fields rather than silently accepting their last value.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+#[derive(Deserialize)]
+struct ActionEnvelope {
+    jsonrpc: String,
+    #[serde(default, deserialize_with = "present")]
+    id: Option<serde_json::Value>,
+    #[serde(default, deserialize_with = "present")]
+    method: Option<serde_json::Value>,
+    #[serde(default, deserialize_with = "present")]
+    params: Option<serde_json::Value>,
+    #[serde(default, deserialize_with = "present")]
+    result: Option<Frame>,
+    #[serde(default, deserialize_with = "present")]
+    error: Option<Rejection>,
+}
+
+#[derive(Deserialize)]
+struct Rejection {
+    code: i64,
+    message: String,
+}
+
+fn parse_response(text: &str, id: u64) -> Result<Option<Observation>, Error> {
+    let response: ActionEnvelope = serde_json::from_str(text).map_err(action_invalid)?;
+    // Well-formed unsolicited notifications may be ignored, but can never
+    // confirm an action or replace its last confirmed observation.
+    if response.jsonrpc == "2.0"
+        && response.id.is_none()
+        && response.method.as_ref().is_some_and(|m| m.is_string())
+        && response.result.is_none()
+        && response.error.is_none()
+        && response
+            .params
+            .as_ref()
+            .is_none_or(|p| p.is_object() || p.is_array())
+    {
+        return Ok(None);
+    }
+    if response.jsonrpc != "2.0"
+        || response.id.as_ref().and_then(|id| id.as_u64()) != Some(id)
+        || response.method.is_some()
+        || response.params.is_some()
+        || response.result.is_some() == response.error.is_some()
+    {
+        return Err(action_invalid("invalid or mismatched response envelope"));
+    }
+    if let Some(error) = response.error {
+        return Err(Error::Rpc {
+            code: error.code,
+            message: error.message,
+        });
+    }
+    let frame = response
+        .result
+        .ok_or_else(|| action_invalid("missing action result"))?;
+    validate_frame(frame)
+        .map(Some)
+        .map_err(|error| match error {
+            Error::InvalidProtocol { message, .. } => action_invalid(message),
+            other => other,
+        })
 }
 
 // Nonblocking I/O plus a deadline checked on *every* read/write bounds partial
