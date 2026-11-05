@@ -30,6 +30,22 @@ emulator and give the game objective/directions to the separate controller.
 See [`docs/agent-harness.md`](docs/agent-harness.md) for the RPC contract and
 the retained snapshot/fixture commands.
 
+## Rust visual-controller client
+
+Separate controller processes can use `chip8::controller::Session` to attach to
+an explicit loopback endpoint, validate/save native PNGs, and execute bounded
+simultaneous keypad actions. Observation, saving, and thinking do not advance
+the game; disconnecting never stops it:
+
+```sh
+cargo run --example observe -- ws://127.0.0.1:PORT initial.png
+# Optional: hold keypad A and F for 6 frames, then save the result:
+cargo run --example observe -- ws://127.0.0.1:PORT initial.png result.png a,f 6
+```
+
+See [the client guide](docs/controller-client.md) for lifecycle ownership,
+timeout defaults, supported images, and failure semantics.
+
 ## Tests
 
 ```sh
