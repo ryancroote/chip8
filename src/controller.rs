@@ -137,6 +137,7 @@ impl Observation {
 
 /// One synchronous controller connection. No background actions or retries.
 pub struct Session {
+    endpoint: String,
     socket: WebSocket<DeadlineStream>,
     observation: Observation,
     timeouts: Timeouts,
@@ -203,6 +204,7 @@ impl Session {
             }
         };
         Ok(Self {
+            endpoint: endpoint.to_owned(),
             socket,
             observation,
             timeouts,
@@ -211,8 +213,29 @@ impl Session {
         })
     }
 
-    /// Last confirmed image; after a rejection or unknown outcome this may no
-    /// longer describe the current game. Reading it never advances emulated time.
+    /// Explicitly release the old connection and observe the selected endpoint
+    /// anew, using the original endpoint and finite connection budgets. No action
+    /// is sent or replayed. Success replaces the last confirmed image and permits
+    /// actions again, including after an unknown outcome.
+    ///
+    /// Failure preserves the previous image as historical and leaves the session
+    /// invalidated; only another explicit successful reconnect permits actions.
+    /// The protocol cannot prove the same emulator process still owns the endpoint.
+    pub fn reconnect(&mut self) -> Result<&Observation, Error> {
+        self.invalidated = true;
+        let _ = self
+            .socket
+            .get_ref()
+            .stream
+            .shutdown(std::net::Shutdown::Both);
+        let fresh = Self::connect(&self.endpoint, self.timeouts)?;
+        *self = fresh;
+        Ok(&self.observation)
+    }
+
+    /// Last confirmed image; after a rejection, unknown outcome, or failed
+    /// reconnect this may no longer describe the current game. Reading it never
+    /// advances emulated time.
     pub fn observation(&self) -> &Observation {
         &self.observation
     }

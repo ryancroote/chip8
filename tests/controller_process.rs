@@ -240,6 +240,49 @@ fn settling_executes_exactly_the_requested_total_frames() {
 }
 
 #[test]
+fn explicit_reconnect_and_controller_handoff_preserve_game_progress() {
+    let mut emulator = Emulator::start();
+    let mut session = Session::connect(&emulator.endpoint, Timeouts::default()).unwrap();
+    session.action(&[], 1).unwrap();
+    let progressed = session.observation().clone();
+    assert_eq!(pixels(&session)[0], 255);
+    session.reconnect().unwrap();
+    assert_eq!(session.observation(), &progressed);
+    session.action(&[], 1).unwrap();
+    assert_eq!(pixels(&session), vec![0; 2048]);
+    session.action(&[], 1).unwrap();
+    session.disconnect().unwrap();
+
+    let mut takeover = Session::connect(&emulator.endpoint, Timeouts::default()).unwrap();
+    assert_eq!(takeover.observation(), &progressed);
+    // Occupied endpoints must not steal ownership or disrupt the active client.
+    let start = std::time::Instant::now();
+    assert!(matches!(
+        Session::connect(
+            &emulator.endpoint,
+            Timeouts {
+                handshake: Duration::from_millis(100),
+                ..Timeouts::default()
+            }
+        ),
+        Err(Error::Deadline {
+            stage: Stage::Handshake
+        })
+    ));
+    assert!(start.elapsed() < Duration::from_secs(1));
+    takeover.action(&[], 1).unwrap();
+    assert_eq!(pixels(&takeover), vec![0; 2048]);
+    takeover.action(&[], 1).unwrap();
+    drop(takeover); // Abrupt controller loss must also release ownership.
+    session = Session::connect(&emulator.endpoint, Timeouts::default()).unwrap();
+    assert_eq!(session.observation(), &progressed);
+    session.action(&[], 1).unwrap();
+    assert_eq!(pixels(&session), vec![0; 2048]);
+    session.disconnect().unwrap();
+    assert!(emulator.child.try_wait().unwrap().is_none());
+}
+
+#[test]
 fn keypad_chords_are_held_simultaneously_not_split_into_single_keys() {
     // Only draw if A and F are both held at the same time. Once drawn,
     // stay in a stable loop, making the resulting pixel unambiguous.
