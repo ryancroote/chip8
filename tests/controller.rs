@@ -1,58 +1,14 @@
+#[path = "common/controller_peer.rs"]
+mod controller_peer;
+
 use base64::Engine;
 use chip8::controller::{Error, Session, Stage, Timeouts};
+use controller_peer::{Peer, accept};
 use serde_json::{Value, json};
 use std::io::Cursor;
 use std::net::{TcpListener, TcpStream};
-use std::thread::JoinHandle;
 use std::time::Duration;
 use tungstenite::{Message, WebSocket};
-
-struct Peer {
-    endpoint: String,
-    thread: Option<JoinHandle<()>>,
-}
-
-impl Peer {
-    fn start(run: impl FnOnce(WebSocket<TcpStream>) + Send + 'static) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let endpoint = format!("ws://{}", listener.local_addr().unwrap());
-        let thread = std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + Duration::from_secs(3);
-            let stream = loop {
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        assert!(std::time::Instant::now() < deadline, "peer accept timeout");
-                        std::thread::sleep(Duration::from_millis(2));
-                    }
-                    Err(e) => panic!("{e}"),
-                }
-            };
-            stream.set_nonblocking(false).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
-            stream
-                .set_write_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
-            run(tungstenite::accept(stream).unwrap());
-        });
-        Self {
-            endpoint,
-            thread: Some(thread),
-        }
-    }
-}
-
-impl Drop for Peer {
-    fn drop(&mut self) {
-        let result = self.thread.take().unwrap().join();
-        if !std::thread::panicking() {
-            result.unwrap();
-        }
-    }
-}
 
 fn initial() -> (Value, Vec<u8>) {
     let mut bytes = Vec::new();
@@ -85,7 +41,8 @@ fn attach_validates_and_saves_original_image_without_sending_an_action() {
     let (mut notification, bytes) = initial();
     notification["extra"] = json!(true);
     notification["params"]["extra"] = json!(true);
-    let peer = Peer::start(move |mut socket| {
+    let peer = Peer::start(move |listener| {
+        let mut socket = accept(&listener);
         socket.send(Message::Ping(vec![1].into())).unwrap();
         send(&mut socket, notification);
         loop {
@@ -125,7 +82,8 @@ fn attach_validates_and_saves_original_image_without_sending_an_action() {
 #[test]
 fn invalid_actions_are_local_and_valid_chords_have_distinct_response_ids() {
     let (notification, _) = initial();
-    let peer = Peer::start(move |mut socket| {
+    let peer = Peer::start(move |listener| {
+        let mut socket = accept(&listener);
         send(&mut socket, notification.clone());
         let mut previous = None;
         for (keys, frames) in [(json!([10, 15]), 60), (json!([]), 1)] {
@@ -170,7 +128,8 @@ fn invalid_actions_are_local_and_valid_chords_have_distinct_response_ids() {
 #[test]
 fn explicit_settling_is_prevalidated_and_ordered_after_confirmed_primary() {
     let (notification, _) = initial();
-    let peer = Peer::start(move |mut socket| {
+    let peer = Peer::start(move |listener| {
+        let mut socket = accept(&listener);
         send(&mut socket, notification.clone());
         for (keys, frames) in [(json!([10, 15]), 60), (json!([]), 60), (json!([1]), 1)] {
             let Message::Text(text) = socket.read().unwrap() else {
@@ -219,7 +178,8 @@ fn explicit_settling_is_prevalidated_and_ordered_after_confirmed_primary() {
 fn primary_failure_never_sends_settling() {
     for mode in ["rejection", "disconnect", "protocol", "deadline"] {
         let (notification, _) = initial();
-        let peer = Peer::start(move |mut socket| {
+        let peer = Peer::start(move |listener| {
+            let mut socket = accept(&listener);
             send(&mut socket, notification.clone());
             assert!(matches!(socket.read().unwrap(), Message::Text(_)));
             match mode {
@@ -267,7 +227,8 @@ fn settling_has_its_own_duration_aware_deadline_and_returns_final_image() {
             .unwrap();
     }
     let expected = final_bytes.clone();
-    let peer = Peer::start(move |mut socket| {
+    let peer = Peer::start(move |listener| {
+        let mut socket = accept(&listener);
         send(&mut socket, notification.clone());
         for stage in 1..=2 {
             let Message::Text(text) = socket.read().unwrap() else {
@@ -311,7 +272,8 @@ fn settling_failure_preserves_completed_primary_without_replaying_it() {
         let mut initial_notification = notification.clone();
         initial_notification["params"]["data"] =
             json!(base64::engine::general_purpose::STANDARD.encode(&blank));
-        let peer = Peer::start(move |mut socket| {
+        let peer = Peer::start(move |listener| {
+            let mut socket = accept(&listener);
             send(&mut socket, initial_notification);
             let Message::Text(primary) = socket.read().unwrap() else {
                 panic!("primary")
@@ -391,7 +353,8 @@ fn received_action_without_acknowledgement_is_unknown_and_never_replayed() {
     for delayed in [false, true] {
         let (notification, _) = initial();
         let (release_reply, await_release) = std::sync::mpsc::channel();
-        let peer = Peer::start(move |mut socket| {
+        let peer = Peer::start(move |listener| {
+            let mut socket = accept(&listener);
             send(&mut socket, notification.clone());
             assert!(matches!(socket.read().unwrap(), Message::Text(_)));
             if delayed {
@@ -436,7 +399,8 @@ fn received_action_without_acknowledgement_is_unknown_and_never_replayed() {
 #[test]
 fn matching_rpc_rejections_preserve_code_and_message_without_claiming_success() {
     let (notification, _) = initial();
-    let peer = Peer::start(move |mut socket| {
+    let peer = Peer::start(move |listener| {
+        let mut socket = accept(&listener);
         send(&mut socket, notification.clone());
         for rejection in [true, false] {
             let Message::Text(text) = socket.read().unwrap() else {
@@ -507,7 +471,8 @@ fn action_responses_require_matching_valid_envelopes_and_validated_frames() {
     }
     for response in cases {
         let notification = notification.clone();
-        let peer = Peer::start(move |mut socket| {
+        let peer = Peer::start(move |listener| {
+            let mut socket = accept(&listener);
             send(&mut socket, notification);
             assert!(matches!(socket.read().unwrap(), Message::Text(_)));
             send(&mut socket, response);
@@ -531,7 +496,8 @@ fn action_responses_require_matching_valid_envelopes_and_validated_frames() {
 #[test]
 fn stale_notifications_and_control_traffic_are_not_action_results_or_new_deadlines() {
     let (notification, _) = initial();
-    let peer = Peer::start(move |mut socket| {
+    let peer = Peer::start(move |listener| {
+        let mut socket = accept(&listener);
         send(&mut socket, notification.clone());
         assert!(matches!(socket.read().unwrap(), Message::Text(_)));
         let until = std::time::Instant::now() + Duration::from_millis(350);
@@ -561,7 +527,8 @@ fn stale_notifications_and_control_traffic_are_not_action_results_or_new_deadlin
 #[test]
 fn control_frames_and_notifications_can_precede_only_a_correlated_success() {
     let (notification, _) = initial();
-    let peer = Peer::start(move |mut socket| {
+    let peer = Peer::start(move |listener| {
+        let mut socket = accept(&listener);
         send(&mut socket, notification.clone());
         let Message::Text(text) = socket.read().unwrap() else {
             panic!("action")
@@ -605,7 +572,8 @@ fn control_frames_and_notifications_can_precede_only_a_correlated_success() {
 #[test]
 fn requested_execution_time_is_added_to_the_transport_allowance() {
     let (notification, _) = initial();
-    let peer = Peer::start(move |mut socket| {
+    let peer = Peer::start(move |listener| {
+        let mut socket = accept(&listener);
         send(&mut socket, notification.clone());
         assert!(matches!(socket.read().unwrap(), Message::Text(_)));
         // Longer than the configured 100ms allowance, but within the
@@ -625,7 +593,8 @@ fn requested_execution_time_is_added_to_the_transport_allowance() {
 fn duplicate_response_fields_are_malformed_even_when_the_last_value_matches() {
     for field in ["id", "jsonrpc", "result"] {
         let (notification, _) = initial();
-        let peer = Peer::start(move |mut socket| {
+        let peer = Peer::start(move |listener| {
+            let mut socket = accept(&listener);
             send(&mut socket, notification.clone());
             assert!(matches!(socket.read().unwrap(), Message::Text(_)));
             let result = notification["params"].to_string();
@@ -656,7 +625,8 @@ fn malformed_or_interrupted_action_messages_are_unknown_not_success() {
         "malformed JSON",
     ] {
         let (notification, _) = initial();
-        let peer = Peer::start(move |mut socket| {
+        let peer = Peer::start(move |listener| {
+            let mut socket = accept(&listener);
             send(&mut socket, notification);
             assert!(matches!(socket.read().unwrap(), Message::Text(_)));
             match mode {
@@ -769,7 +739,8 @@ fn rejects_invalid_initial_envelopes_and_frames() {
     }
     for notification in cases {
         let label = notification.to_string();
-        let peer = Peer::start(move |mut socket| {
+        let peer = Peer::start(move |listener| {
+            let mut socket = accept(&listener);
             send(&mut socket, notification);
         });
         assert!(
@@ -798,7 +769,8 @@ fn short_timeouts() -> Timeouts {
 #[test]
 fn missing_initial_and_control_floods_expire_a_total_deadline() {
     for flood in [false, true] {
-        let peer = Peer::start(move |mut socket| {
+        let peer = Peer::start(move |listener| {
+            let mut socket = accept(&listener);
             let until = std::time::Instant::now() + Duration::from_millis(350);
             while std::time::Instant::now() < until {
                 if flood && socket.send(Message::Pong(vec![1].into())).is_err() {
@@ -821,7 +793,8 @@ fn missing_initial_and_control_floods_expire_a_total_deadline() {
 #[test]
 fn disconnect_is_bounded_even_if_peer_never_acknowledges_close() {
     let (notification, _) = initial();
-    let peer = Peer::start(move |mut socket| {
+    let peer = Peer::start(move |listener| {
+        let mut socket = accept(&listener);
         send(&mut socket, notification);
         // Deliberately never read/acknowledge the client's close frame.
         std::thread::sleep(Duration::from_millis(350));
@@ -840,7 +813,8 @@ fn disconnect_is_bounded_even_if_peer_never_acknowledges_close() {
 #[test]
 fn abrupt_loss_during_disconnect_is_not_a_graceful_acknowledgement() {
     let (notification, _) = initial();
-    let peer = Peer::start(move |mut socket| {
+    let peer = Peer::start(move |listener| {
+        let mut socket = accept(&listener);
         send(&mut socket, notification);
         assert!(matches!(socket.read().unwrap(), Message::Close(_)));
         // Drop TCP without flushing tungstenite's queued close response.
@@ -863,22 +837,25 @@ fn close_truncation_binary_and_oversized_messages_are_not_observations() {
         "oversized",
         "malformed JSON",
     ] {
-        let peer = Peer::start(move |mut socket| match mode {
-            "close" => {
-                let _ = socket.close(None);
-            }
-            "truncated" => {
-                use std::io::Write;
-                socket.get_mut().write_all(&[0x81, 10, b'{']).unwrap();
-            }
-            "binary" => {
-                let _ = socket.send(Message::Binary(vec![0; 20].into()));
-            }
-            "oversized" => {
-                let _ = socket.send(Message::Text("x".repeat(40 * 1024).into()));
-            }
-            _ => {
-                let _ = socket.send(Message::Text("{".into()));
+        let peer = Peer::start(move |listener| {
+            let mut socket = accept(&listener);
+            match mode {
+                "close" => {
+                    let _ = socket.close(None);
+                }
+                "truncated" => {
+                    use std::io::Write;
+                    socket.get_mut().write_all(&[0x81, 10, b'{']).unwrap();
+                }
+                "binary" => {
+                    let _ = socket.send(Message::Binary(vec![0; 20].into()));
+                }
+                "oversized" => {
+                    let _ = socket.send(Message::Text("x".repeat(40 * 1024).into()));
+                }
+                _ => {
+                    let _ = socket.send(Message::Text("{".into()));
+                }
             }
         });
         let result = Session::connect(&peer.endpoint, Timeouts::default());
