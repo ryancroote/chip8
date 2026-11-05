@@ -107,10 +107,14 @@ fn run_graphical(state: SharedState, rpc: bool, rom_loaded: bool) -> Result<(), 
                 }
             }
         }
-        let state = state
+        // Copy the display, then release the machine before native event
+        // processing and frame pacing. Holding the lock through render can
+        // starve the RPC thread as the window repeatedly reacquires it.
+        let display = state
             .lock()
-            .map_err(|_| "machine state lock poisoned".to_string())?;
-        renderer.render(&state);
+            .map_err(|_| "machine state lock poisoned".to_string())?
+            .display;
+        renderer.render(&display);
     }
     Ok(())
 }

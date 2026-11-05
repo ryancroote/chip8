@@ -1,0 +1,20 @@
+[
+  {
+    "mode": "idle",
+    "pid": 18074,
+    "exit_after_click_seconds": 0.3069342919625342,
+    "launcher_exit": 0
+  },
+  {
+    "mode": "active",
+    "pid": 18105,
+    "exit_after_click_seconds": 0.7725741660688072,
+    "launcher_exit": 0
+  },
+  {
+    "mode": "disconnected",
+    "pid": 18122,
+    "exit_after_click_seconds": 0.2219714999664575,
+    "launcher_exit": 0
+  }
+]

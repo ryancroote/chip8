@@ -1,0 +1,56 @@
+[
+  {
+    "label": "physical-key-ignored",
+    "elapsed_seconds": 0.2464011248666793,
+    "front_pid": 16599,
+    "matching_pixels": 2048
+  },
+  {
+    "label": "focused0",
+    "elapsed_seconds": 0.2262644579168409,
+    "front_pid": 16599,
+    "matching_pixels": 2048
+  },
+  {
+    "label": "focused1",
+    "elapsed_seconds": 0.22493949998170137,
+    "front_pid": 16599,
+    "matching_pixels": 2048
+  },
+  {
+    "label": "focused2",
+    "elapsed_seconds": 0.21449845819734037,
+    "front_pid": 16599,
+    "matching_pixels": 2048
+  },
+  {
+    "label": "focused-paused",
+    "elapsed_seconds": 0.2466118331067264,
+    "front_pid": 16599,
+    "matching_pixels": 2048
+  },
+  {
+    "label": "unfocused0",
+    "elapsed_seconds": 0.22482637502253056,
+    "front_pid": 536,
+    "matching_pixels": 2048
+  },
+  {
+    "label": "unfocused1",
+    "elapsed_seconds": 0.22505512507632375,
+    "front_pid": 536,
+    "matching_pixels": 2048
+  },
+  {
+    "label": "unfocused2",
+    "elapsed_seconds": 0.2279633330181241,
+    "front_pid": 536,
+    "matching_pixels": 2048
+  },
+  {
+    "label": "unfocused-paused",
+    "elapsed_seconds": 0.239096499979496,
+    "front_pid": 536,
+    "matching_pixels": 2048
+  }
+]

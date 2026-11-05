@@ -1,6 +1,6 @@
 //! Minimal windowed renderer for the CHIP-8 display.
 //!
-//! Reads `State` and draws its 64x32 monochrome pixel grid into a `minifb`
+//! Reads a display snapshot and draws its 64x32 monochrome pixel grid into a `minifb`
 //! window, scaled up to scale_factor per CHIP-8 pixel. Kept a thin,
 //! zero-emulator-coupling consumer: it only renders and reports whether the
 //! window is still open.
@@ -67,8 +67,8 @@ impl Renderer {
 
     /// Push the current framebuffer to the window. The window remains visible
     /// even when the pixels are unchanged (per Requirement 2.5).
-    pub fn render(&mut self, state: &State) {
-        for (row, display_row) in state.display.iter().enumerate() {
+    pub fn render(&mut self, display: &[[bool; DISPLAY_WIDTH]; DISPLAY_HEIGHT]) {
+        for (row, display_row) in display.iter().enumerate() {
             for (column, &pixel) in display_row.iter().enumerate() {
                 let index = row * self.width + column;
                 self.buffer[index] = if pixel { PIXEL_ON } else { PIXEL_OFF };
