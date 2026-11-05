@@ -81,6 +81,16 @@ pub enum Error {
         source: Box<Error>,
     },
     SessionInvalidated,
+    /// Primary succeeded, but the released-key stage did not confirm success.
+    /// Never replay the primary action based on this error. The confirmed
+    /// primary image may be historical; this is not rollback or settled success.
+    SettlingFailed {
+        primary: Observation,
+        primary_frames: u32,
+        settling_frames: u32,
+        outcome_unknown: bool,
+        source: Box<Error>,
+    },
 }
 
 impl std::fmt::Display for Error {
@@ -91,7 +101,9 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::UnknownOutcome { source } => Some(source.as_ref()),
+            Self::UnknownOutcome { source } | Self::SettlingFailed { source, .. } => {
+                Some(source.as_ref())
+            }
             _ => None,
         }
     }
@@ -217,21 +229,7 @@ impl Session {
         if self.invalidated {
             return Err(Error::SessionInvalidated);
         }
-        if !(1..=60).contains(&frames) {
-            return Err(Error::InvalidAction("frames must be in 1..=60".into()));
-        }
-        let mut seen = [false; 16];
-        for &key in keys {
-            let Some(pressed) = seen.get_mut(usize::from(key)) else {
-                return Err(Error::InvalidAction("keys must be in 0..=15".into()));
-            };
-            if *pressed {
-                return Err(Error::InvalidAction(
-                    "duplicate keys are not allowed".into(),
-                ));
-            }
-            *pressed = true;
-        }
+        validate_action(keys, frames)?;
         let id = self.next_id;
         self.next_id = id.checked_add(1).ok_or(Error::RequestIdsExhausted)?;
         self.socket.get_mut().deadline = Instant::now()
@@ -257,6 +255,43 @@ impl Session {
                 })
             }
         }
+    }
+
+    /// Execute a primary action, then optionally one released-key action.
+    /// `primary_frames` is 1..=60 and `settling_frames` is 0..=60. The entire
+    /// operation is validated before transmission. Zero settling (also the
+    /// default behavior of `action`) executes only the primary request.
+    /// Each stage has its own duration-aware finite deadline and distinct ID.
+    /// Neither stage is retried; settling starts only after primary success.
+    /// A settling failure returns `SettlingFailed` with the completed primary
+    /// observation, both requested durations, the cause, and outcome ambiguity.
+    /// Unknown settling outcomes invalidate the session just like `action`.
+    pub fn action_with_settling(
+        &mut self,
+        keys: &[u8],
+        primary_frames: u32,
+        settling_frames: u32,
+    ) -> Result<&Observation, Error> {
+        validate_action(keys, primary_frames)?;
+        if settling_frames > 60 {
+            return Err(Error::InvalidAction(
+                "settling frames must be in 0..=60".into(),
+            ));
+        }
+        self.action(keys, primary_frames)?;
+        if settling_frames != 0 {
+            let primary = self.observation().clone();
+            if let Err(source) = self.action(&[], settling_frames) {
+                return Err(Error::SettlingFailed {
+                    primary,
+                    primary_frames,
+                    settling_frames,
+                    outcome_unknown: matches!(source, Error::UnknownOutcome { .. }),
+                    source: Box::new(source),
+                });
+            }
+        }
+        Ok(self.observation())
     }
 
     fn execute_action(&mut self, keys: &[u8], frames: u32, id: u64) -> Result<Observation, Error> {
@@ -312,6 +347,25 @@ impl Session {
             }
         }
     }
+}
+
+fn validate_action(keys: &[u8], frames: u32) -> Result<(), Error> {
+    if !(1..=60).contains(&frames) {
+        return Err(Error::InvalidAction("frames must be in 1..=60".into()));
+    }
+    let mut seen = [false; 16];
+    for &key in keys {
+        let Some(pressed) = seen.get_mut(usize::from(key)) else {
+            return Err(Error::InvalidAction("keys must be in 0..=15".into()));
+        };
+        if *pressed {
+            return Err(Error::InvalidAction(
+                "duplicate keys are not allowed".into(),
+            ));
+        }
+        *pressed = true;
+    }
+    Ok(())
 }
 
 fn endpoint_address(

@@ -179,6 +179,67 @@ fn exact_frame_counts_include_sixty_frames_without_hidden_execution() {
 }
 
 #[test]
+fn explicit_settling_releases_keys_and_zero_settling_adds_no_frames() {
+    // Exactly 11 instructions per frame. Toggle x=0 when A is held,
+    // x=1 when released. Each loop initializes all values it uses.
+    let rom = [
+        0x60, 0x0a, 0x61, 0, 0x62, 0, 0xa2, 0x18, 0xe0, 0x9e, 0x61, 1, 0xe0, 0xa1, 0x73, 0, 0xd1,
+        0x21, 0x73, 0, 0x73, 0, 0x12, 0, 0x80,
+    ];
+    let emulator = Emulator::with_rom(&rom);
+    let mut session = Session::connect(&emulator.endpoint, Timeouts::default()).unwrap();
+    assert!(matches!(
+        session.action_with_settling(&[10], 1, 61),
+        Err(Error::InvalidAction(_))
+    ));
+    session.action_with_settling(&[10], 1, 0).unwrap();
+    let mut expected = vec![0; 2048];
+    expected[0] = 255;
+    assert_eq!(
+        pixels(&session),
+        expected,
+        "zero settling runs only the held frame"
+    );
+    session.action_with_settling(&[10], 1, 1).unwrap();
+    expected[0] = 0;
+    expected[1] = 255;
+    assert_eq!(
+        pixels(&session),
+        expected,
+        "settling must execute with A released"
+    );
+    session.action_with_settling(&[10], 60, 60).unwrap();
+    assert_eq!(
+        pixels(&session),
+        expected,
+        "both 60-frame stages preserve parity"
+    );
+    session.disconnect().unwrap();
+}
+
+#[test]
+fn settling_executes_exactly_the_requested_total_frames() {
+    // Draw successive pixels once per 11 instructions (one RPC frame).
+    let mut rom = vec![0x60, 0, 0x61, 0, 0xa2, 0x1c, 0xd0, 0x11, 0x70, 1];
+    for _ in 0..8 {
+        rom.extend([0x73, 0]);
+    }
+    rom.extend([0x12, 6, 0x80]);
+    let emulator = Emulator::with_rom(&rom);
+    let mut session = Session::connect(&emulator.endpoint, Timeouts::default()).unwrap();
+    session.action_with_settling(&[10], 1, 0).unwrap();
+    session.action_with_settling(&[10], 1, 60).unwrap();
+    let mut expected = vec![0; 2048];
+    expected[..62].fill(255);
+    assert_eq!(
+        pixels(&session),
+        expected,
+        "one plus one plus sixty frames, no hidden waits"
+    );
+    session.disconnect().unwrap();
+}
+
+#[test]
 fn keypad_chords_are_held_simultaneously_not_split_into_single_keys() {
     // Only draw if A and F are both held at the same time. Once drawn,
     // stay in a stable loop, making the resulting pixel unambiguous.
