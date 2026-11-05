@@ -45,6 +45,17 @@ verification on macOS is required for those properties:
    account for scaling). Test both focused and unfocused windows.
 3. While the controller thinks, verify repainting stays responsive but the game
    does not advance. Physical keyboard input must not affect RPC gameplay.
+4. Disconnect gracefully, then abruptly (terminate the controller), reconnecting
+   after each. Verify the same game progress is preserved. The graphical probe
+   automates these handoffs, including a pause longer than the socket poll timeout.
+5. Repeat window-close checks with an idle connected controller, during a
+   60-frame action, and after disconnect. Each process must exit within 5 seconds
+   of clicking the native close button. The server shutdown test covers bounded
+   worker teardown, including incomplete handshakes, but is **not** evidence that
+   the native close button works.
+6. Smoke-test Rush Hour through the same graphical endpoint: enter a board,
+   slide a block, replace the controller, and confirm the frame and move counter
+   are preserved. No separate headless instance should be running.
 
 If native screenshot capture is unavailable, record this as an unverified manual
 check rather than treating RPC image assertions as a window-pixel comparison.

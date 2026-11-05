@@ -4,7 +4,7 @@ use chip8::rpc::RpcServer;
 use serde_json::{Value, json};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket, connect};
 
@@ -38,6 +38,52 @@ fn assert_png(frame: &Value) {
     let reader = decoder.read_info().unwrap();
     assert_eq!(reader.info().width, 64);
     assert_eq!(reader.info().height, 32);
+}
+
+#[test]
+fn rpc_shutdown_is_bounded_with_idle_active_and_incomplete_connections() {
+    for mode in ["idle", "active", "incomplete handshake"] {
+        let mut machine = State::new();
+        machine.load_program(&[0x12, 0x00], 0x200);
+        let state = Arc::new(Mutex::new(machine));
+        let server = RpcServer::start(state, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = server.local_addr();
+        let mut client = None;
+        let mut incomplete = None;
+        if mode == "incomplete handshake" {
+            incomplete = Some(TcpStream::connect(address).unwrap());
+        } else {
+            let (mut socket, _) = connect(format!("ws://{address}")).unwrap();
+            set_read_timeout(&mut socket);
+            frame(socket.read().unwrap());
+            if mode == "active" {
+                socket
+                    .send(Message::Text(
+                        json!({
+                            "jsonrpc":"2.0", "id":1, "method":"chip8.action",
+                            "params":{"keys":[5],"frames":60}
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .unwrap();
+            }
+            client = Some(socket);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let started = Instant::now();
+        let shutdown = std::thread::spawn(move || {
+            drop(server);
+            tx.send(()).unwrap();
+        });
+        rx.recv_timeout(Duration::from_secs(5))
+            .unwrap_or_else(|_| panic!("shutdown hung with {mode}"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        shutdown.join().unwrap();
+        drop(client);
+        drop(incomplete);
+    }
 }
 
 #[test]

@@ -47,6 +47,14 @@ The frame is an 8-bit grayscale PNG at the CHIP-8 display's native 64×32 resolu
 
 `keys` contains CHIP-8 key values from `0` through `15`; multiple keys may be held together. `frames` must be from `1` through `60`. The emulator advances 11 instructions and ticks timers once per frame at approximately 60 frames per second. It releases all keys when the action ends and replies with the resulting frame in `result`, using the same shape as the notification's `params`.
 
+In graphical RPC mode, the window and controller share one running machine.
+The renderer copies the display under the machine-state lock, then releases it
+before native window-event processing and frame pacing. Rendering therefore does
+not hold up controller access to the machine. Connect to the graphical instance's
+printed endpoint; starting another headless instance creates an independent game,
+not a mirror of the visible window. See [TESTING.md](../TESTING.md#graphical-rpc-regression-probe)
+for the native-window regression probe and manual pixel/focus/close checks.
+
 The emulator is paused while the controller decides and between actions. If the controller disconnects, the game remains paused and the window stays open; a reconnect receives the current frame. Closing the graphical window exits graphical RPC mode. Headless RPC mode exits when the process is terminated.
 
 ## Snapshot-based headless interface

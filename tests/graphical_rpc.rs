@@ -45,9 +45,18 @@ impl Emulator {
         let stderr = emulator.child.stderr.take().unwrap();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
+            let mut reader = BufReader::new(stderr);
             let mut line = String::new();
-            let result = BufReader::new(stderr).read_line(&mut line).map(|_| line);
+            let result = reader.read_line(&mut line).map(|_| line);
             let _ = tx.send(result);
+            // Keep draining diagnostics for the child's lifetime. Closing its
+            // stderr pipe early makes disconnect diagnostics fail to write.
+            for line in reader.lines() {
+                match line {
+                    Ok(line) => eprintln!("emulator: {line}"),
+                    Err(_) => break,
+                }
+            }
         });
         let line = rx
             .recv_timeout(Duration::from_secs(3))
@@ -135,6 +144,42 @@ fn repeated_display_changes(headless: bool) {
         assert_eq!(pixels(&action(&mut socket, &[5])), expected);
         assert_eq!(pixels(&action(&mut socket, &[])), expected);
     }
+}
+
+fn controller_handoff(headless: bool) {
+    let emulator = Emulator::start(headless);
+    let mut first = emulator.connect();
+    receive(&mut first);
+    let lit = action(&mut first, &[5]);
+    action(&mut first, &[]);
+    first.close(None).unwrap();
+    // Drop without waiting for the close reply: the server must still accept
+    // a replacement controller, and the game must not reset.
+    drop(first);
+    let mut second = emulator.connect();
+    assert_eq!(receive(&mut second)["params"], lit);
+    // Pause beyond the server's socket poll timeout: thinking is not EOF.
+    std::thread::sleep(Duration::from_millis(300));
+    let dark = action(&mut second, &[5]);
+    assert_eq!(pixels(&dark), vec![0; 64 * 32]);
+    action(&mut second, &[]);
+    // No WebSocket close handshake: simulate an abruptly lost controller.
+    drop(second);
+    std::thread::sleep(Duration::from_millis(300));
+    let mut third = emulator.connect();
+    assert_eq!(receive(&mut third)["params"], dark);
+    assert_eq!(pixels(&action(&mut third, &[5])), pixels(&lit));
+}
+
+#[test]
+#[ignore = "requires a native desktop; run with --ignored --test-threads=1"]
+fn graphical_controller_handoff_preserves_the_paused_game() {
+    controller_handoff(false);
+}
+
+#[test]
+fn headless_control_for_controller_handoff() {
+    controller_handoff(true);
 }
 
 #[test]
