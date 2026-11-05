@@ -138,7 +138,9 @@ fn serve_client(stream: TcpStream, state: &SharedState, stop: &AtomicBool) -> Re
                         .map_err(|error| error.to_string())?,
                 }
             }
-            Ok(Message::Close(_)) => return Ok(()),
+            // Reading Close queues its acknowledgement; flush before dropping
+            // TCP so a controller can distinguish graceful close from loss.
+            Ok(Message::Close(_)) => return socket.flush().map_err(|error| error.to_string()),
             Ok(Message::Ping(data)) => socket
                 .send(Message::Pong(data))
                 .map_err(|error| error.to_string())?,

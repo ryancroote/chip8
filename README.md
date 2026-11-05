@@ -30,6 +30,19 @@ emulator and give the game objective/directions to the separate controller.
 See [`docs/agent-harness.md`](docs/agent-harness.md) for the RPC contract and
 the retained snapshot/fixture commands.
 
+## Rust visual-controller client
+
+Separate controller processes can use `chip8::controller::Session` to attach to
+an explicit loopback endpoint, validate the initial native PNG, save it, and
+disconnect without advancing or stopping the game:
+
+```sh
+cargo run --example observe -- ws://127.0.0.1:PORT initial.png
+```
+
+See [the client guide](docs/controller-client.md) for lifecycle ownership,
+timeout defaults, supported images, and failure semantics.
+
 ## Tests
 
 ```sh
