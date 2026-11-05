@@ -137,17 +137,55 @@ even for a normally functioning emulator. All I/O stays synchronous and bounded.
 - An unknown outcome immediately releases the transport and invalidates the
   session. Later `action` calls return `Error::SessionInvalidated` locally.
   `observation()` still exposes the last confirmed image for diagnosis, **not a
-  current observation of the uncertain game**. Drop the session or consume it
-  with `disconnect`; graceful disconnect may fail on its closed transport.
+  current observation of the uncertain game**. Explicitly `reconnect()` to recover,
+  drop the session, or consume it with `disconnect`; graceful disconnect may fail
+  on its closed transport.
 - Request IDs are distinct within a connection. The theoretical counter-exhaustion
   case returns `Error::RequestIdsExhausted` locally instead of reusing an ID.
 - `Observation::save_png` returns an independent `std::io::Result`. If saving a
   successful action's image fails, the move is still confirmed. Retry the file
   write if appropriate, never the move. A cloned observation can retain its image.
 
-Settling and an explicit reconnect method belong to follow-up tickets. For now,
-an uncertain session cannot perform further actions; callers can release it and
-explicitly create a new `Session::connect` to observe the endpoint anew. No game
-restart or endpoint fallback occurs. The protocol cannot prove the endpoint is
-still owned by the same emulator process. ROM controls, planning, and success
-detection remain entirely outside the client.
+## Explicit recovery and controller handoff
+
+`Session::reconnect(&mut self) -> Result<&Observation, Error>` releases the old
+transport and attaches to the **original supplied endpoint**, using the original
+`Timeouts`. It sends no action, never replays an uncertain input, and never resets
+or loads a ROM. Success requires a fresh valid initial frame, replaces
+`observation()`, and permits new actions even after `UnknownOutcome`. Pixels need
+not differ: confirmation comes from the new connection's initial notification.
+
+A failed attempt returns the connection/initial-observation error with its stage,
+preserves the previous confirmed image in the session as **historical**, and
+leaves actions locally refused with `SessionInvalidated`. There is no stale
+success or transparent retry loop; the caller may explicitly attempt recovery
+again. For example, after deciding to recover from an unknown outcome:
+
+```rust,no_run
+# use chip8::controller::{Session, Timeouts};
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+# let mut session = Session::connect("ws://127.0.0.1:9000", Timeouts::default())?;
+let historical = session.observation().clone();
+let current = session.reconnect()?; // no old action is resent
+current.save_png("recovered.png")?;
+// Reinterpret the current display before choosing a NEW action.
+# let _ = historical;
+# session.disconnect()?;
+# Ok(()) }
+```
+
+For graceful handoff, consume the first controller with bounded `disconnect()`;
+another controller uses `Session::connect` at the same endpoint and observes the
+paused game's current progress. Dropping a session also releases ownership,
+without a close handshake. An occupied endpoint may accept TCP but its WebSocket
+handshake waits for the active controller; the configured handshake deadline
+bounds that wait without stealing ownership or disrupting the active controller.
+Failed connection attempts release their sockets. Neither recovery nor handoff
+starts or stops the caller-owned emulator.
+
+**Endpoint identity limitation:** the existing protocol cannot prove that the
+same emulator process still owns an endpoint. If another emulator later binds
+that address, explicit reconnect observes that selected endpoint, not a verified
+original instance. There is no discovery, fallback address, or invented identity
+guarantee. ROM controls, planning, and success detection remain outside the client.
+Settling is handled separately from explicit session recovery.
