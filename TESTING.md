@@ -18,6 +18,41 @@ cargo test -- --test-threads=1 # ordered output
 
 All instruction tests are active; none are ignored as blocked on `step()`.
 
+### Graphical RPC regression probe
+
+On a logged-in desktop, run:
+
+```sh
+cargo test --test graphical_rpc -- --include-ignored --test-threads=1
+```
+
+The graphical probe opens a real native window, waits for its render loop to
+start, then uses bounded WebSocket connections and actions to toggle a known
+pixel repeatedly. Connecting immediately during window construction can hide
+render-loop lock starvation. A headless control runs the same ROM and requests.
+Child processes are reaped even on assertion failure. Normal `cargo test` skips
+native-window checks, which cannot run reliably on headless CI.
+
+This probe verifies native-window/RPC coexistence and returned pixels, **not**
+actual window pixels, focus handling, or clicking the close button. Manual
+verification on macOS is required for those properties:
+
+1. Start a graphical RPC instance and connect a controller to its printed URL.
+   Do not start a second headless instance. Use the probe's toggle ROM or another
+   deterministic display-changing ROM.
+2. After at least three display-changing actions, compare each returned image
+   against the window within one second of the response (ignore borders and
+   account for scaling). Test both focused and unfocused windows.
+3. While the controller thinks, verify repainting stays responsive but the game
+   does not advance. Physical keyboard input must not affect RPC gameplay.
+
+If native screenshot capture is unavailable, record this as an unverified manual
+check rather than treating RPC image assertions as a window-pixel comparison.
+On this development machine the default macOS 27 SDK's text stubs are rejected
+by the installed linker; tests can be run with
+`SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk` as a local
+command environment override (no project toolchain change is required).
+
 ## Test harness
 
 The helpers in `tests/common/mod.rs` provide `new_case` and `run`. A case starts from `State::new()` with the program counter at `0x200`. Set initial public state, provide opcodes as `Vec<u16>`, set the number of steps, and assert only the state fields relevant to the behavior under test:
