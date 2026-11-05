@@ -57,6 +57,10 @@ verification on macOS is required for those properties:
    slide a block, replace the controller, and confirm the frame and move counter
    are preserved. No separate headless instance should be running.
 
+The [native verification record](docs/verification/graphical-rpc-native.md)
+records executed pixel, focus, keyboard, and close-button checks separately from
+automated RPC assertions, including any outstanding verification.
+
 If native screenshot capture is unavailable, record this as an unverified manual
 check rather than treating RPC image assertions as a window-pixel comparison.
 On this development machine the default macOS 27 SDK's text stubs are rejected
