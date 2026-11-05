@@ -68,6 +68,21 @@ by the installed linker; tests can be run with
 `SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk` as a local
 command environment override (no project toolchain change is required).
 
+### Controller client controlled peers
+
+Run the public-client regression scenarios with:
+
+```sh
+cargo test --test controller --test controller_reconnect
+```
+
+Both suites use `tests/common/controller_peer.rs` for loopback listener ownership,
+three-second bounded acceptance, two-second socket read/write timeouts (including
+the WebSocket handshake), and panic-aware peer-thread cleanup. Scenarios call
+`accept(&listener)` themselves, so reconnect tests retain control of successive
+connections and their replies. Frame fixtures and protocol assertions stay in
+each suite; the helper does not emulate game behavior.
+
 ## Test harness
 
 The helpers in `tests/common/mod.rs` provide `new_case` and `run`. A case starts from `State::new()` with the program counter at `0x200`. Set initial public state, provide opcodes as `Vec<u16>`, set the number of steps, and assert only the state fields relevant to the behavior under test:

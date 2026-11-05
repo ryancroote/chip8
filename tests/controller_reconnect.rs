@@ -1,56 +1,15 @@
 //! Explicit recovery through the public session interface and bounded wire peers.
+#[path = "common/controller_peer.rs"]
+mod controller_peer;
+
 use base64::Engine;
 use chip8::controller::{Error, Session, Stage, Timeouts};
+use controller_peer::{Peer, accept};
 use serde_json::{Value, json};
-use std::net::{TcpListener, TcpStream};
-use std::thread::JoinHandle;
+use std::net::TcpStream;
 use std::time::{Duration, Instant};
 use tungstenite::{Message, WebSocket};
 
-struct Peer {
-    endpoint: String,
-    thread: Option<JoinHandle<()>>,
-}
-impl Peer {
-    fn start(run: impl FnOnce(TcpListener) + Send + 'static) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        Self {
-            endpoint: format!("ws://{}", listener.local_addr().unwrap()),
-            thread: Some(std::thread::spawn(move || run(listener))),
-        }
-    }
-}
-impl Drop for Peer {
-    fn drop(&mut self) {
-        let result = self.thread.take().unwrap().join();
-        if !std::thread::panicking() {
-            result.unwrap();
-        }
-    }
-}
-fn accept(listener: &TcpListener) -> WebSocket<TcpStream> {
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        match listener.accept() {
-            Ok((stream, _)) => {
-                stream.set_nonblocking(false).unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(2)))
-                    .unwrap();
-                stream
-                    .set_write_timeout(Some(Duration::from_secs(2)))
-                    .unwrap();
-                return tungstenite::accept(stream).unwrap();
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                assert!(Instant::now() < deadline, "peer accept deadline");
-                std::thread::sleep(Duration::from_millis(1));
-            }
-            Err(e) => panic!("{e}"),
-        }
-    }
-}
 fn frame(pixel: u8) -> Value {
     let mut bytes = Vec::new();
     {
