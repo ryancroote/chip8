@@ -87,26 +87,24 @@ fn load_state(rom_path: Option<&PathBuf>) -> Result<State, String> {
 fn run_graphical(state: SharedState, rpc: bool, rom_loaded: bool) -> Result<(), String> {
     let mut renderer = Renderer::new(10)?;
     while renderer.is_open() {
-<<<<<<< Updated upstream
         // Only execute if a ROM was loaded; otherwise just show the blank
         // initial display.
-        if rom_path.is_some() {
-=======
-        if !rpc && rom_loaded {
+        if !rpc {
             let mut state = state
                 .lock()
                 .map_err(|_| "machine state lock poisoned".to_string())?;
-            renderer.update_keypad_input(&mut state, true);
->>>>>>> Stashed changes
-            let mut error_free = true;
-            for _ in 0..INSTRUCTIONS_PER_FRAME {
-                if state.step().is_err() {
-                    error_free = false;
-                    break;
+            renderer.update_keypad_input(&mut state);
+            if rom_loaded {
+                let mut error_free = true;
+                for _ in 0..INSTRUCTIONS_PER_FRAME {
+                    if state.step().is_err() {
+                        error_free = false;
+                        break;
+                    }
                 }
-            }
-            if error_free {
-                state.tick_timers();
+                if error_free {
+                    state.tick_timers();
+                }
             }
         }
         let state = state
