@@ -102,6 +102,12 @@ fn serve(listener: TcpListener, state: SharedState, stop: Arc<AtomicBool>) {
 }
 
 fn serve_client(stream: TcpStream, state: &SharedState, stop: &AtomicBool) -> Result<(), String> {
+    // Accepted sockets can inherit the listener's nonblocking mode (macOS).
+    // This worker uses bounded blocking I/O; otherwise a delayed upgrade can
+    // fail immediately with WouldBlock before the controller sends its bytes.
+    stream
+        .set_nonblocking(false)
+        .map_err(|error| error.to_string())?;
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
         .map_err(|error| error.to_string())?;

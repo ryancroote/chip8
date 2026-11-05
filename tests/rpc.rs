@@ -41,6 +41,27 @@ fn assert_png(frame: &Value) {
 }
 
 #[test]
+fn controller_can_send_its_handshake_after_tcp_connection_is_accepted() {
+    let state = Arc::new(Mutex::new(State::new()));
+    let server = RpcServer::start(state, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let address = server.local_addr();
+    let stream = TcpStream::connect(address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    // Let the server accept TCP before the WebSocket upgrade bytes arrive.
+    std::thread::sleep(Duration::from_millis(200));
+    let (mut socket, _) = tungstenite::client(format!("ws://{address}"), stream)
+        .expect("a bounded handshake must tolerate delayed upgrade bytes");
+    let initial = frame(socket.read().unwrap());
+    assert_eq!(initial["method"], "chip8.frame");
+    assert_png(&initial["params"]);
+}
+
+#[test]
 fn rpc_shutdown_is_bounded_with_idle_active_and_incomplete_connections() {
     for mode in ["idle", "active", "incomplete handshake"] {
         let mut machine = State::new();

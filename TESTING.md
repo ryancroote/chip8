@@ -1,6 +1,6 @@
 # CHIP-8 Test Suite
 
-The tests use `State::step()` directly, so they do not open a window, read the clock, play audio, or read a physical keyboard. Timer ticks and key input are controlled explicitly. Expected instruction behavior is documented in [`docs/chip8-opcodes.md`](docs/chip8-opcodes.md); the project's terminology is in [`GLOSSARY.md`](GLOSSARY.md).
+The instruction tests use `State::step()` directly, so they do not open a window, read the clock, play audio, or read a physical keyboard. Timer ticks and key input are controlled explicitly. Expected instruction behavior is documented in [`docs/chip8-opcodes.md`](docs/chip8-opcodes.md); the project's terminology is in [`GLOSSARY.md`](GLOSSARY.md).
 
 ## Control interfaces
 
