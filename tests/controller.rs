@@ -123,6 +123,378 @@ fn attach_validates_and_saves_original_image_without_sending_an_action() {
 }
 
 #[test]
+fn invalid_actions_are_local_and_valid_chords_have_distinct_response_ids() {
+    let (notification, _) = initial();
+    let peer = Peer::start(move |mut socket| {
+        send(&mut socket, notification.clone());
+        let mut previous = None;
+        for (keys, frames) in [(json!([10, 15]), 60), (json!([]), 1)] {
+            let Message::Text(text) = socket.read().unwrap() else {
+                panic!("action text")
+            };
+            let request: Value = serde_json::from_str(text.as_str()).unwrap();
+            assert_eq!(request["method"], "chip8.action");
+            assert_eq!(request["params"], json!({"keys":keys,"frames":frames}));
+            let id = request["id"].as_u64().unwrap();
+            assert_ne!(Some(id), previous);
+            previous = Some(id);
+            send(
+                &mut socket,
+                json!({"jsonrpc":"2.0","id":id,"result":notification["params"]}),
+            );
+        }
+        assert!(matches!(socket.read().unwrap(), Message::Close(_)));
+        let _ = socket.flush();
+    });
+    let mut session = Session::connect(&peer.endpoint, short_timeouts()).unwrap();
+    let before = session.observation().clone();
+    for (keys, frames) in [
+        (vec![16], 1),
+        (vec![255], 1),
+        (vec![1, 1], 1),
+        (vec![], 0),
+        (vec![], 61),
+        (vec![], u32::MAX),
+    ] {
+        assert!(matches!(
+            session.action(&keys, frames),
+            Err(Error::InvalidAction(_))
+        ));
+        assert_eq!(session.observation(), &before);
+    }
+    session.action(&[10, 15], 60).unwrap();
+    session.action(&[], 1).unwrap();
+    session.disconnect().unwrap();
+}
+
+#[test]
+fn received_action_without_acknowledgement_is_unknown_and_never_replayed() {
+    for delayed in [false, true] {
+        let (notification, _) = initial();
+        let (release_reply, await_release) = std::sync::mpsc::channel();
+        let peer = Peer::start(move |mut socket| {
+            send(&mut socket, notification.clone());
+            assert!(matches!(socket.read().unwrap(), Message::Text(_)));
+            if delayed {
+                // Withhold acknowledgement until the caller's deadline expires,
+                // then attempt a late reply. It must never revive the session.
+                if await_release.recv_timeout(Duration::from_secs(2)).is_ok() {
+                    let _ = socket.send(Message::Text(
+                        json!({"jsonrpc":"2.0","id":1,
+                        "result":notification["params"]})
+                        .to_string()
+                        .into(),
+                    ));
+                }
+                // Any second text request is an unsafe retry, even if explicit.
+                loop {
+                    match socket.read() {
+                        Ok(Message::Text(text)) => panic!("replayed uncertain action: {text}"),
+                        Ok(Message::Ping(_) | Message::Pong(_)) => {}
+                        _ => break,
+                    }
+                }
+            }
+        });
+        let mut session = Session::connect(&peer.endpoint, short_timeouts()).unwrap();
+        let before = session.observation().clone();
+        let start = std::time::Instant::now();
+        let error = session.action(&[1], 1).unwrap_err();
+        assert!(
+            matches!(error, Error::UnknownOutcome { ref source }
+            if if delayed { matches!(**source, Error::Deadline { stage: Stage::Action }) }
+            else { matches!(**source, Error::Disconnected { stage: Stage::Action }) }),
+            "{error}"
+        );
+        assert!(start.elapsed() < Duration::from_millis(400));
+        assert_eq!(session.observation(), &before);
+        let error = session.action(&[1], 1).unwrap_err();
+        assert!(matches!(error, Error::SessionInvalidated), "{error}");
+        let _ = release_reply.send(());
+    }
+}
+
+#[test]
+fn matching_rpc_rejections_preserve_code_and_message_without_claiming_success() {
+    let (notification, _) = initial();
+    let peer = Peer::start(move |mut socket| {
+        send(&mut socket, notification.clone());
+        for rejection in [true, false] {
+            let Message::Text(text) = socket.read().unwrap() else {
+                panic!("action")
+            };
+            let request: Value = serde_json::from_str(&text).unwrap();
+            if rejection {
+                send(
+                    &mut socket,
+                    json!({"jsonrpc":"2.0","id":request["id"],
+                    "error":{"code":-32000,"message":"execution fault after partial progress","data":{}}}),
+                );
+            } else {
+                send(
+                    &mut socket,
+                    json!({"jsonrpc":"2.0","id":request["id"],"result":notification["params"]}),
+                );
+            }
+        }
+    });
+    let mut session = Session::connect(&peer.endpoint, short_timeouts()).unwrap();
+    let before = session.observation().clone();
+    assert!(
+        matches!(session.action(&[], 1), Err(Error::Rpc {code:-32000, message})
+        if message == "execution fault after partial progress")
+    );
+    assert_eq!(session.observation(), &before);
+    session.action(&[], 1).unwrap();
+}
+
+#[test]
+fn action_responses_require_matching_valid_envelopes_and_validated_frames() {
+    let (notification, _) = initial();
+    let valid = json!({"jsonrpc":"2.0","id":1,"result":notification["params"]});
+    let mut cases = vec![
+        json!(null),
+        json!([]),
+        json!({}),
+        json!({"jsonrpc":"2.0","id":1}),
+        json!({"jsonrpc":"2.0","id":1,"error":{"code":"bad","message":"no"}}),
+        json!({"jsonrpc":"2.0","id":1,"error":{"code":-1}}),
+    ];
+    for (path, value) in [
+        (vec!["id"], json!(2)),
+        (vec!["id"], json!("1")),
+        (vec!["id"], json!(null)),
+        (vec!["jsonrpc"], json!("1.0")),
+        (
+            vec!["error"],
+            json!({"code":-1,"message":"both result and error"}),
+        ),
+        (vec!["method"], json!("chip8.frame")),
+        (vec!["params"], json!({})),
+        (vec!["result"], json!(null)),
+        (vec!["result", "width"], json!(128)),
+        (vec!["result", "format"], json!("jpeg")),
+        (vec!["result", "data"], json!("%%%")),
+        (vec!["result", "data"], json!("bm90IFBORw==")),
+        (vec!["result", "data"], json!("A".repeat(24 * 1024))),
+    ] {
+        let mut bad = valid.clone();
+        let mut field = &mut bad;
+        for key in path {
+            field = &mut field[key];
+        }
+        *field = value;
+        cases.push(bad);
+    }
+    for response in cases {
+        let notification = notification.clone();
+        let peer = Peer::start(move |mut socket| {
+            send(&mut socket, notification);
+            assert!(matches!(socket.read().unwrap(), Message::Text(_)));
+            send(&mut socket, response);
+            // No later action may be sent on an uncertain session.
+            assert!(!matches!(socket.read(), Ok(Message::Text(_))));
+        });
+        let mut session = Session::connect(&peer.endpoint, short_timeouts()).unwrap();
+        let before = session.observation().clone();
+        assert!(
+            matches!(session.action(&[1], 1), Err(Error::UnknownOutcome {source})
+            if matches!(*source, Error::InvalidProtocol {stage:Stage::Action,..}))
+        );
+        assert_eq!(session.observation(), &before);
+        assert!(matches!(
+            session.action(&[], 1),
+            Err(Error::SessionInvalidated)
+        ));
+    }
+}
+
+#[test]
+fn stale_notifications_and_control_traffic_are_not_action_results_or_new_deadlines() {
+    let (notification, _) = initial();
+    let peer = Peer::start(move |mut socket| {
+        send(&mut socket, notification.clone());
+        assert!(matches!(socket.read().unwrap(), Message::Text(_)));
+        let until = std::time::Instant::now() + Duration::from_millis(350);
+        while std::time::Instant::now() < until {
+            if socket
+                .send(Message::Text(notification.to_string().into()))
+                .is_err()
+            {
+                break;
+            }
+            if socket.send(Message::Pong(vec![1].into())).is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    });
+    let mut session = Session::connect(&peer.endpoint, short_timeouts()).unwrap();
+    let start = std::time::Instant::now();
+    assert!(
+        matches!(session.action(&[], 1), Err(Error::UnknownOutcome {source})
+        if matches!(*source, Error::Deadline {stage:Stage::Action}))
+    );
+    assert!(start.elapsed() >= Duration::from_millis(90));
+    assert!(start.elapsed() < Duration::from_millis(300));
+}
+
+#[test]
+fn control_frames_and_notifications_can_precede_only_a_correlated_success() {
+    let (notification, _) = initial();
+    let peer = Peer::start(move |mut socket| {
+        send(&mut socket, notification.clone());
+        let Message::Text(text) = socket.read().unwrap() else {
+            panic!("action")
+        };
+        let request: Value = serde_json::from_str(&text).unwrap();
+        socket.send(Message::Ping(vec![7].into())).unwrap();
+        send(&mut socket, notification.clone());
+        socket.send(Message::Pong(vec![8].into())).unwrap();
+        send(
+            &mut socket,
+            json!({"jsonrpc":"2.0","id":request["id"],"result":notification["params"]}),
+        );
+        // Read the second action, skipping control replies. An old response ID
+        // must invalidate the session, not return the first action's image.
+        loop {
+            if matches!(socket.read().unwrap(), Message::Text(_)) {
+                break;
+            }
+        }
+        send(
+            &mut socket,
+            json!({"jsonrpc":"2.0","id":request["id"],"result":notification["params"]}),
+        );
+    });
+    let mut session = Session::connect(&peer.endpoint, short_timeouts()).unwrap();
+    session.action(&[], 1).unwrap();
+    let confirmed = session.observation().clone();
+    let dir = tempfile::tempdir().unwrap();
+    assert!(confirmed.save_png(dir.path()).is_err());
+    assert_eq!(session.observation(), &confirmed);
+    assert!(
+        matches!(session.action(&[],1), Err(Error::UnknownOutcome { source })
+        if matches!(*source, Error::InvalidProtocol { stage:Stage::Action,.. }))
+    );
+    assert!(matches!(
+        session.action(&[], 1),
+        Err(Error::SessionInvalidated)
+    ));
+}
+
+#[test]
+fn requested_execution_time_is_added_to_the_transport_allowance() {
+    let (notification, _) = initial();
+    let peer = Peer::start(move |mut socket| {
+        send(&mut socket, notification.clone());
+        assert!(matches!(socket.read().unwrap(), Message::Text(_)));
+        // Longer than the configured 100ms allowance, but within the
+        // 60-frame execution budget plus allowance. The real-process test
+        // separately verifies actual 60-frame execution and server pacing.
+        std::thread::sleep(Duration::from_millis(200));
+        send(
+            &mut socket,
+            json!({"jsonrpc":"2.0","id":1,"result":notification["params"]}),
+        );
+    });
+    let mut session = Session::connect(&peer.endpoint, short_timeouts()).unwrap();
+    session.action(&[], 60).unwrap();
+}
+
+#[test]
+fn duplicate_response_fields_are_malformed_even_when_the_last_value_matches() {
+    for field in ["id", "jsonrpc", "result"] {
+        let (notification, _) = initial();
+        let peer = Peer::start(move |mut socket| {
+            send(&mut socket, notification.clone());
+            assert!(matches!(socket.read().unwrap(), Message::Text(_)));
+            let result = notification["params"].to_string();
+            let extra = match field {
+                "id" => "\"id\":999,",
+                "jsonrpc" => "\"jsonrpc\":\"1.0\",",
+                _ => "\"result\":null,",
+            };
+            let text = format!("{{{extra}\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{result}}}");
+            let _ = socket.send(Message::Text(text.into()));
+        });
+        let mut session = Session::connect(&peer.endpoint, short_timeouts()).unwrap();
+        assert!(
+            matches!(session.action(&[], 1), Err(Error::UnknownOutcome {source})
+            if matches!(*source, Error::InvalidProtocol {stage:Stage::Action,..})),
+            "duplicate {field}"
+        );
+    }
+}
+
+#[test]
+fn malformed_or_interrupted_action_messages_are_unknown_not_success() {
+    for mode in [
+        "close",
+        "truncated",
+        "binary",
+        "oversized",
+        "malformed JSON",
+    ] {
+        let (notification, _) = initial();
+        let peer = Peer::start(move |mut socket| {
+            send(&mut socket, notification);
+            assert!(matches!(socket.read().unwrap(), Message::Text(_)));
+            match mode {
+                "close" => {
+                    let _ = socket.close(None);
+                }
+                "truncated" => {
+                    use std::io::Write;
+                    socket.get_mut().write_all(&[0x81, 10, b'{']).unwrap();
+                }
+                "binary" => {
+                    let _ = socket.send(Message::Binary(vec![0; 20].into()));
+                }
+                "oversized" => {
+                    let _ = socket.send(Message::Text("x".repeat(40 * 1024).into()));
+                }
+                _ => {
+                    let _ = socket.send(Message::Text("{".into()));
+                }
+            }
+        });
+        let mut session = Session::connect(&peer.endpoint, short_timeouts()).unwrap();
+        let before = session.observation().clone();
+        let Err(Error::UnknownOutcome { source }) = session.action(&[], 1) else {
+            panic!("{mode}")
+        };
+        if matches!(mode, "close" | "truncated") {
+            assert!(
+                matches!(
+                    *source,
+                    Error::Disconnected {
+                        stage: Stage::Action
+                    }
+                ),
+                "{mode}: {source}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    *source,
+                    Error::InvalidProtocol {
+                        stage: Stage::Action,
+                        ..
+                    }
+                ),
+                "{mode}: {source}"
+            );
+        }
+        assert_eq!(session.observation(), &before);
+        assert!(matches!(
+            session.action(&[], 1),
+            Err(Error::SessionInvalidated)
+        ));
+    }
+}
+
+#[test]
 fn rejects_invalid_initial_envelopes_and_frames() {
     let (valid, png) = initial();
     let mut cases = vec![json!(null), json!({}), json!([valid.clone()])];
@@ -200,6 +572,7 @@ fn short_timeouts() -> Timeouts {
         handshake: Duration::from_millis(100),
         observation: Duration::from_millis(100),
         disconnect: Duration::from_millis(100),
+        action_transport: Duration::from_millis(100),
     }
 }
 

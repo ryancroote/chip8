@@ -33,11 +33,14 @@ the retained snapshot/fixture commands.
 ## Rust visual-controller client
 
 Separate controller processes can use `chip8::controller::Session` to attach to
-an explicit loopback endpoint, validate the initial native PNG, save it, and
-disconnect without advancing or stopping the game:
+an explicit loopback endpoint, validate/save native PNGs, and execute bounded
+simultaneous keypad actions. Observation, saving, and thinking do not advance
+the game; disconnecting never stops it:
 
 ```sh
 cargo run --example observe -- ws://127.0.0.1:PORT initial.png
+# Optional: hold keypad A and F for 6 frames, then save the result:
+cargo run --example observe -- ws://127.0.0.1:PORT initial.png result.png a,f 6
 ```
 
 See [the client guide](docs/controller-client.md) for lifecycle ownership,

@@ -15,8 +15,6 @@ struct Emulator {
 }
 impl Emulator {
     fn start() -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        let rom = dir.path().join("toggle.ch8");
         // Initialize coordinates/sprite, then toggle (0,0) once per 11
         // instructions (= one RPC frame). No input or wall-clock dependency.
         let mut bytes = vec![0x60, 0x00, 0x61, 0x00, 0xa2, 0x1c, 0xd0, 0x11];
@@ -24,6 +22,11 @@ impl Emulator {
             bytes.extend([0x73, 0x00]);
         }
         bytes.extend([0x12, 0x06, 0x80]);
+        Self::with_rom(&bytes)
+    }
+    fn with_rom(bytes: &[u8]) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let rom = dir.path().join("deterministic.ch8");
         std::fs::write(&rom, bytes).unwrap();
         let child = Command::new(env!("CARGO_BIN_EXE_chip8"))
             .arg(rom)
@@ -104,6 +107,96 @@ fn pixels(session: &Session) -> Vec<u8> {
     let mut pixels = vec![0; 2048];
     reader.next_frame(&mut pixels).unwrap();
     pixels
+}
+
+#[test]
+fn bounded_actions_and_empty_execution_return_confirmed_pixels() {
+    let emulator = Emulator::start();
+    let mut session = Session::connect(&emulator.endpoint, Timeouts::default()).unwrap();
+    assert_eq!(pixels(&session), vec![0; 2048]);
+    let confirmed = session.action(&[0xa], 1).unwrap().clone();
+    let mut lit = vec![0; 2048];
+    lit[0] = 255;
+    assert_eq!(pixels(&session), lit);
+    let dir = tempfile::tempdir().unwrap();
+    assert!(confirmed.save_png(dir.path()).is_err());
+    assert_eq!(session.observation(), &confirmed);
+    std::thread::sleep(Duration::from_millis(100));
+    session.action(&[], 2).unwrap();
+    assert_eq!(pixels(&session), lit, "two explicit frames preserve parity");
+    session.action(&[], 1).unwrap();
+    assert_eq!(pixels(&session), vec![0; 2048]);
+    session.disconnect().unwrap();
+}
+
+#[test]
+fn exact_frame_counts_include_sixty_frames_without_hidden_execution() {
+    // Draw the next pixel every 11 instructions, i.e. once per RPC frame.
+    let mut rom = vec![0x60, 0, 0x61, 0, 0xa2, 0x1c, 0xd0, 0x11, 0x70, 1];
+    for _ in 0..8 {
+        rom.extend([0x73, 0]);
+    }
+    rom.extend([0x12, 6, 0x80]);
+    let emulator = Emulator::with_rom(&rom);
+    let mut session = Session::connect(&emulator.endpoint, Timeouts::default()).unwrap();
+    for (keys, frames) in [(vec![16], 1), (vec![0, 0], 1), (vec![], 0), (vec![], 61)] {
+        assert!(matches!(
+            session.action(&keys, frames),
+            Err(Error::InvalidAction(_))
+        ));
+    }
+    session.action(&[0xf], 1).unwrap();
+    let mut expected = vec![0; 2048];
+    expected[0] = 255;
+    assert_eq!(
+        pixels(&session),
+        expected,
+        "invalid actions must not advance"
+    );
+    session.action(&[], 2).unwrap();
+    expected[1..3].fill(255);
+    assert_eq!(pixels(&session), expected);
+    let saved = session.observation().clone();
+    let dir = tempfile::tempdir().unwrap();
+    saved.save_png(dir.path().join("confirmed.png")).unwrap();
+    std::thread::sleep(Duration::from_millis(120));
+    session.disconnect().unwrap();
+    let mut session = Session::connect(&emulator.endpoint, Timeouts::default()).unwrap();
+    assert_eq!(
+        session.observation(),
+        &saved,
+        "saving/thinking advanced time"
+    );
+    let start = std::time::Instant::now();
+    session.action(&[], 60).unwrap();
+    assert!(
+        start.elapsed() >= Duration::from_millis(900),
+        "server owns pacing"
+    );
+    expected[3..63].fill(255);
+    assert_eq!(pixels(&session), expected, "exactly 60 more frames");
+    session.disconnect().unwrap();
+}
+
+#[test]
+fn keypad_chords_are_held_simultaneously_not_split_into_single_keys() {
+    // Only draw if A and F are both held at the same time. Once drawn,
+    // stay in a stable loop, making the resulting pixel unambiguous.
+    let rom = [
+        0x60, 0x0a, 0x61, 0x0f, 0x62, 0, 0x63, 0, 0xa2, 0x16, 0xe0, 0x9e, 0x12, 0x0a, 0xe1, 0x9e,
+        0x12, 0x0a, 0xd2, 0x31, 0x12, 0x14, 0x80,
+    ];
+    let emulator = Emulator::with_rom(&rom);
+    let mut session = Session::connect(&emulator.endpoint, Timeouts::default()).unwrap();
+    session.action(&[0xa], 2).unwrap();
+    assert_eq!(pixels(&session), vec![0; 2048]);
+    session.action(&[0xf], 2).unwrap();
+    assert_eq!(pixels(&session), vec![0; 2048]);
+    session.action(&[0xa, 0xf], 1).unwrap();
+    let mut expected = vec![0; 2048];
+    expected[0] = 255;
+    assert_eq!(pixels(&session), expected);
+    session.disconnect().unwrap();
 }
 
 #[test]
