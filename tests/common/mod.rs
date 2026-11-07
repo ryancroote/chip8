@@ -115,31 +115,31 @@ fn check(case: &TestCase, state: &State) -> Vec<String> {
         }
     }
 
-    if let Some(value) = expected.i {
-        if state.i != value {
-            failures.push(format!(
-                "  I: expected 0x{:03X}, actual 0x{:03X}",
-                value, state.i
-            ));
-        }
+    if let Some(value) = expected.i
+        && state.i != value
+    {
+        failures.push(format!(
+            "  I: expected 0x{:03X}, actual 0x{:03X}",
+            value, state.i
+        ));
     }
 
-    if let Some(value) = expected.pc {
-        if state.pc != value {
-            failures.push(format!(
-                "  PC: expected 0x{:03X}, actual 0x{:03X}",
-                value, state.pc
-            ));
-        }
+    if let Some(value) = expected.pc
+        && state.pc != value
+    {
+        failures.push(format!(
+            "  PC: expected 0x{:03X}, actual 0x{:03X}",
+            value, state.pc
+        ));
     }
 
-    if let Some(expected_stack) = &expected.stack {
-        if &state.stack != expected_stack {
-            failures.push(format!(
-                "  Stack: expected {:?}, actual {:?}",
-                expected_stack, state.stack
-            ));
-        }
+    if let Some(expected_stack) = &expected.stack
+        && &state.stack != expected_stack
+    {
+        failures.push(format!(
+            "  Stack: expected {:?}, actual {:?}",
+            expected_stack, state.stack
+        ));
     }
 
     for &(address, value) in &expected.memory {
@@ -184,22 +184,22 @@ fn check(case: &TestCase, state: &State) -> Vec<String> {
         }
     }
 
-    if let Some(value) = expected.delay {
-        if state.delay != value {
-            failures.push(format!(
-                "  Delay timer: expected {}, actual {}",
-                value, state.delay
-            ));
-        }
+    if let Some(value) = expected.delay
+        && state.delay != value
+    {
+        failures.push(format!(
+            "  Delay timer: expected {}, actual {}",
+            value, state.delay
+        ));
     }
 
-    if let Some(value) = expected.sound {
-        if state.sound != value {
-            failures.push(format!(
-                "  Sound timer: expected {}, actual {}",
-                value, state.sound
-            ));
-        }
+    if let Some(value) = expected.sound
+        && state.sound != value
+    {
+        failures.push(format!(
+            "  Sound timer: expected {}, actual {}",
+            value, state.sound
+        ));
     }
 
     for &(key, value) in &expected.keys {
@@ -234,15 +234,15 @@ fn report(case: &TestCase, state: &State, failures: &[String]) -> String {
     }
 
     out.push_str(&format!("Instructions executed: {}\n", case.steps));
-    if case.steps > 0 {
-        if let Some(opcode) = case.program.get(case.steps as usize - 1) {
-            out.push_str(&format!(
-                "Instruction associated with failure: 0x{:04X} at 0x{:03X} (step {})\n",
-                opcode,
-                case.load_at + (case.steps as u16 - 1) * 2,
-                case.steps
-            ));
-        }
+    if case.steps > 0
+        && let Some(opcode) = case.program.get(case.steps as usize - 1)
+    {
+        out.push_str(&format!(
+            "Instruction associated with failure: 0x{:04X} at 0x{:03X} (step {})\n",
+            opcode,
+            case.load_at + (case.steps as u16 - 1) * 2,
+            case.steps
+        ));
     }
 
     out.push_str("\nExpected vs actual:\n");
