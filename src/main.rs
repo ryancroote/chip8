@@ -1,49 +1,20 @@
-use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::Duration;
 
 use chip8::agent;
 use chip8::chip8::State;
 use chip8::renderer::Renderer;
-use chip8::rpc::{RpcServer, SharedState};
 
 /// Where a program is loaded and execution begins.
 const PROGRAM_ORIGIN: u16 = 0x200;
 /// Target ~700 instructions/second at 60 FPS, per the display spec.
 const INSTRUCTIONS_PER_FRAME: usize = 11;
-const DEFAULT_RPC_PORT: u16 = 8787;
-const USAGE: &str = "usage: chip8 [ROM] [--rpc [--headless] [--port PORT]] | chip8 agent [ARGS...]";
+const USAGE: &str = "usage: chip8 [ROM] | chip8 agent [ARGS...]";
 
-struct Options {
-    rom_path: Option<PathBuf>,
-    rpc: bool,
-    headless: bool,
-    port: u16,
-}
-
-fn parse_options(args: &[String]) -> Result<Options, String> {
+fn parse_rom_path(args: &[String]) -> Result<Option<PathBuf>, String> {
     let mut rom_path = None;
-    let mut rpc = false;
-    let mut headless = false;
-    let mut port = DEFAULT_RPC_PORT;
-    let mut port_set = false;
-    let mut index = 0;
-
-    while index < args.len() {
-        match args[index].as_str() {
+    for arg in args {
+        match arg.as_str() {
             "--help" | "-h" => return Err(USAGE.into()),
-            "--rpc" => rpc = true,
-            "--headless" => headless = true,
-            "--port" => {
-                index += 1;
-                let value = args.get(index).ok_or("--port requires a port number")?;
-                port = value
-                    .parse()
-                    .map_err(|_| "--port must be a number in 0..=65535")?;
-                port_set = true;
-            }
             value if value.starts_with('-') => {
                 return Err(format!("unknown option: {value}"));
             }
@@ -53,25 +24,8 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
                 }
             }
         }
-        index += 1;
     }
-
-    if headless && !rpc {
-        return Err("--headless requires --rpc".into());
-    }
-    if port_set && !rpc {
-        return Err("--port requires --rpc".into());
-    }
-    if rpc && rom_path.is_none() {
-        return Err("RPC mode requires a ROM path".into());
-    }
-
-    Ok(Options {
-        rom_path,
-        rpc,
-        headless,
-        port,
-    })
+    Ok(rom_path)
 }
 
 fn load_state(rom_path: Option<&PathBuf>) -> Result<State, String> {
@@ -84,48 +38,27 @@ fn load_state(rom_path: Option<&PathBuf>) -> Result<State, String> {
     Ok(state)
 }
 
-fn run_graphical(state: SharedState, rpc: bool, rom_loaded: bool) -> Result<(), String> {
+fn run_graphical(mut state: State, rom_loaded: bool) -> Result<(), String> {
     let mut renderer = Renderer::new(10)?;
     while renderer.is_open() {
+        renderer.update_keypad_input(&mut state);
         // Only execute if a ROM was loaded; otherwise just show the blank
         // initial display.
-        if !rpc {
-            let mut state = state
-                .lock()
-                .map_err(|_| "machine state lock poisoned".to_string())?;
-            renderer.update_keypad_input(&mut state);
-            if rom_loaded {
-                let mut error_free = true;
-                for _ in 0..INSTRUCTIONS_PER_FRAME {
-                    if state.step().is_err() {
-                        error_free = false;
-                        break;
-                    }
-                }
-                if error_free {
-                    state.tick_timers();
+        if rom_loaded {
+            let mut error_free = true;
+            for _ in 0..INSTRUCTIONS_PER_FRAME {
+                if state.step().is_err() {
+                    error_free = false;
+                    break;
                 }
             }
+            if error_free {
+                state.tick_timers();
+            }
         }
-        // Copy the display, then release the machine before native event
-        // processing and frame pacing. Holding the lock through render can
-        // starve the RPC thread as the window repeatedly reacquires it.
-        let display = state
-            .lock()
-            .map_err(|_| "machine state lock poisoned".to_string())?
-            .display;
-        renderer.render(&display);
+        renderer.render(&state.display);
     }
     Ok(())
-}
-
-fn start_rpc(state: SharedState, port: u16) -> Result<RpcServer, String> {
-    let address: SocketAddr = format!("127.0.0.1:{port}")
-        .parse()
-        .expect("loopback address with a validated port parses");
-    let server = RpcServer::start(state, address)?;
-    eprintln!("RPC listening at ws://{}", server.local_addr());
-    Ok(server)
 }
 
 fn run() -> Result<(), String> {
@@ -138,18 +71,9 @@ fn run() -> Result<(), String> {
         return agent::run(&args[1..]);
     }
 
-    let options = parse_options(&args)?;
-    let state = Arc::new(Mutex::new(load_state(options.rom_path.as_ref())?));
-    if options.rpc {
-        let _server = start_rpc(Arc::clone(&state), options.port)?;
-        if options.headless {
-            loop {
-                thread::sleep(Duration::from_secs(60));
-            }
-        }
-        return run_graphical(state, true, true);
-    }
-    run_graphical(state, false, options.rom_path.is_some())
+    let rom_path = parse_rom_path(&args)?;
+    let state = load_state(rom_path.as_ref())?;
+    run_graphical(state, rom_path.is_some())
 }
 
 fn main() {

@@ -1,9 +1,9 @@
 //! Minimal windowed renderer for the CHIP-8 display.
 //!
 //! Reads a display snapshot and draws its 64x32 monochrome pixel grid into a `minifb`
-//! window, scaled up to scale_factor per CHIP-8 pixel. Kept a thin,
-//! zero-emulator-coupling consumer: it only renders and reports whether the
-//! window is still open.
+//! window, scaled up to scale_factor per CHIP-8 pixel. Kept a thin host
+//! adapter: it renders the display, reads host keys into the `State` keypad
+//! via `update_keypad_input`, and reports whether the window is still open.
 //!
 //! See `.kiro/specs/chip8-display/requirements.md`.
 
