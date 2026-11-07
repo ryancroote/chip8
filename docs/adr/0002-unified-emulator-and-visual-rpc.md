@@ -1,3 +1,5 @@
 # One executable with a visual controller RPC
 
+_Status: RPC portion superseded by [ADR-0003](0003-remove-visual-controller-rpc.md)._
+
 The emulator is distributed as one `chip8` executable with graphical, headless-RPC, and snapshot-test subcommands. A game controller connects over a loopback-only WebSocket JSON-RPC interface, receives PNG display frames, and submits bounded keypad actions; the emulator pauses between actions so the controller reacts to current state. This replaces the exploratory two-child-process harness, while retaining its deterministic snapshot JSON-lines and fixture workflow under `chip8 agent` for tests and compatibility. The controller sees only display images, keeping the interface usable across arbitrary CHIP-8 ROMs without inventing ROM-specific memory semantics.
