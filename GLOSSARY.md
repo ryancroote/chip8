@@ -40,6 +40,9 @@ _Avoid_: bot, player
 A separate process that receives images of the CHIP-8 display and chooses keypad inputs for the running game.
 _Avoid_: Agent (when referring to visual game control)
 
+**Continuous control**:
+A game-control model in which emulation advances in real time independently of the game controller's observation and decision cycle.
+
 ## Instructions and profile
 
 **Opcode**:
