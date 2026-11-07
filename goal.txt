@@ -50,14 +50,8 @@ When several moves seem plausible, choose a purposeful legal move and inspect
 the result rather than waiting indefinitely. Reconsider unsuccessful moves
 using the recent display/action history.
 
-MENUS AND TIMING
-================
-The emulator is paused while you decide. Each action frame advances only
-1/60 second, regardless of how much real time passes. The controller releases
-all keys after each action and normally advances additional released-key
-settling frames before presenting the next image. You do not need a separate
-no-key action merely to release a key.
-
+MENUS
+=====
 If still at the Play menu, press A for 60 frames. If at board-set selection,
 confirm the initial board set with A for 60 frames. Once the puzzle appears,
 switch to playing it; do not keep pressing A alone as if still in a menu.

@@ -1,61 +1,9 @@
-# Emulator control interfaces
+# Agent interface
 
-The project builds one executable, `chip8`, with three ways to use it:
+The project builds one executable, `chip8`, with two ways to use it:
 
 - `chip8 [ROM]` opens the graphical emulator. A ROM runs with local keyboard input; without a ROM, the window shows a blank display.
-- `chip8 ROM --rpc` opens the graphical emulator and waits for a game controller over RPC. Physical keyboard input is disabled in this mode.
-- `chip8 ROM --rpc --headless` serves the same controller interface without opening a window.
-
-RPC mode requires a ROM. The controller supplies its own goal or directions to Jev; the emulator only runs the ROM, exposes display images, and applies keypad actions.
-
-## Visual game controller RPC
-
-The server uses JSON-RPC 2.0 over WebSocket and binds to `127.0.0.1:8787` by default:
-
-```sh
-cargo run -- ibm.ch8 --rpc
-cargo run -- ibm.ch8 --rpc --headless --port 8790
-```
-
-The port is configurable with `--port`. Use `--port 0` to ask the operating system for an available port; the actual WebSocket URL is printed to stderr. Only loopback addresses are supported. A second controller waits until the current connection closes; each emulator instance has one active controller.
-
-When a controller connects, the server immediately sends the current frame as a JSON-RPC notification:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "chip8.frame",
-  "params": {
-    "width": 64,
-    "height": 32,
-    "format": "png",
-    "data": "<base64-encoded PNG>"
-  }
-}
-```
-
-The frame is an 8-bit grayscale PNG at the CHIP-8 display's native 64×32 resolution. The controller chooses a set of keypad keys and how many frames to hold them:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "chip8.action",
-  "params": { "keys": [5], "frames": 30 }
-}
-```
-
-`keys` contains CHIP-8 key values from `0` through `15`; multiple keys may be held together. `frames` must be from `1` through `60`. The emulator advances 11 instructions and ticks timers once per frame at approximately 60 frames per second. It releases all keys when the action ends and replies with the resulting frame in `result`, using the same shape as the notification's `params`.
-
-In graphical RPC mode, the window and controller share one running machine.
-The renderer copies the display under the machine-state lock, then releases it
-before native window-event processing and frame pacing. Rendering therefore does
-not hold up controller access to the machine. Connect to the graphical instance's
-printed endpoint; starting another headless instance creates an independent game,
-not a mirror of the visible window. See [TESTING.md](../TESTING.md#graphical-rpc-regression-probe)
-for the native-window regression probe and manual pixel/focus/close checks.
-
-The emulator is paused while the controller decides and between actions. If the controller disconnects, the game remains paused and the window stays open; a reconnect receives the current frame. Closing the graphical window exits graphical RPC mode. Headless RPC mode exits when the process is terminated.
+- `chip8 agent [ARGS...]` runs the snapshot-based JSON-lines interface and fixture workflow described below.
 
 ## Snapshot-based headless interface
 
@@ -150,6 +98,5 @@ repository's documented [CHIP-8 profile](chip8-opcodes.md) is supported.
 
 Run `cargo test`. Instruction tests exercise the emulator directly;
 `tests/agent.rs` preserves the snapshot JSON-lines and fixture workflow through
-the unified executable. `tests/rpc.rs` exercises the WebSocket controller
-boundary, and `tests/cli.rs` starts the headless RPC mode as a subprocess. The
-visible window itself still requires a manual check.
+the unified executable, and `tests/cli.rs` checks the command line. The visible
+window itself still requires a manual check.
